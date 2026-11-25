@@ -1,0 +1,30 @@
+# Normalize every text file to LF in the repository and on checkout,
+# on every platform. Prevents clone-time autocrlf from turning the
+# working tree into CRLF and leaking CRs into newly added files
+# (which breaks LF-anchored tooling, e.g. the release workflow's WIT
+# version extraction).
+* text=auto eol=lf
+
+# Binary assets must never be normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.jar binary
+*.wasm binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.exe binary
+*.dll binary
+*.dylib binary
+*.node binary
+*.pdf binary
+*.hprof binary
