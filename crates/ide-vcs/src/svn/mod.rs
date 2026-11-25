@@ -453,8 +453,14 @@ impl Backend for SvnWorkingCopy {
         let _ = against_index;
         let diff = self.diff_bytes(&[path.to_path_buf()], None, &CancellationToken::new())?;
         if diff.is_empty() {
-            // Unversioned files have no base side, like git's untracked ones:
-            // one Added hunk spanning the whole text.
+            // `svn diff` is also empty for versioned files without edits; only
+            // unversioned ones lack a base side and, like git's untracked
+            // files, render as one Added hunk spanning the whole text.
+            let untracked =
+                matches!(self.status_map(&[path.to_path_buf()])?.get(path), Some(Some(ChangeKind::Untracked)),);
+            if !untracked {
+                return Ok(Vec::new());
+            }
             return Ok(crate::diff::all_added(current_text));
         }
         Ok(parse::diff_line_hunks(&crate::text_encoding::decode(&diff, encoding)))

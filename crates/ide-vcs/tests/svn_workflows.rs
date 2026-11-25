@@ -265,6 +265,35 @@ fn update_after_another_checkout_committed() {
     assert_eq!(log[0].summary, "remote change");
 }
 
+/// The gutter must tell "unchanged" from "unversioned": `svn diff` is empty
+/// for both, but only an unversioned file has no base side. Regression for
+/// unchanged versioned files rendering as one whole-file Added hunk.
+#[test]
+fn line_hunks_distinguish_unchanged_from_unversioned() {
+    let Some(fx) = Fixture::new() else { return };
+    let wc = fx.wc();
+    let encoding = utf8();
+
+    // Versioned file without edits: no hunks at all.
+    let hunks = Backend::line_hunks(&*wc, &fx.path("a.txt"), &fx.read("a.txt"), false, encoding).unwrap();
+    assert!(hunks.is_empty(), "unchanged versioned file must have no hunks: {hunks:?}");
+
+    // After an edit the hunks cover exactly the changed lines (0-based start).
+    fx.write("a.txt", "one\ntwo\n");
+    let hunks = Backend::line_hunks(&*wc, &fx.path("a.txt"), &fx.read("a.txt"), false, encoding).unwrap();
+    assert_eq!(hunks.len(), 1, "one hunk for the edited lines: {hunks:?}");
+    assert_eq!(hunks[0].start, 1, "0-based line of the added 'two'");
+    assert_eq!(hunks[0].lines, 1);
+
+    // An unversioned file has no base side: one Added hunk spanning it.
+    fx.write("brand-new.txt", "brand new\n");
+    let hunks =
+        Backend::line_hunks(&*wc, &fx.path("brand-new.txt"), &fx.read("brand-new.txt"), false, encoding).unwrap();
+    assert_eq!(hunks.len(), 1, "unversioned file renders as one Added hunk: {hunks:?}");
+    assert!(matches!(hunks[0].kind, HunkKind::Added));
+    assert_eq!(hunks[0].lines, 1);
+}
+
 /// g) The IDE file hooks schedule real operations: files_added opens for add,
 /// file_moved records delete + add of the committed file, files_deleted
 /// schedules the deletion — and everything commits cleanly.
