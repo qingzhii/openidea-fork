@@ -17,6 +17,10 @@ pub struct ProjectInfo {
     #[serde(default)]
     pub display_name: String,
     pub is_git: bool,
+    /// The version-control family of the primary repository, when the project
+    /// is under version control at all (`git` / `svn`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<ide_vcs::VcsKind>,
     pub settings: Settings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<ide_workspace::workspace::Workspace>,
@@ -40,7 +44,8 @@ pub fn info(project: &Project) -> ProjectInfo {
             .map(|w| w.display_name(&project.root, &primary))
             .unwrap_or_else(|| primary.clone()),
         name: workspace.as_ref().filter(|w| w.is_container(&project.root)).map(|w| w.name.clone()).unwrap_or(primary),
-        is_git: !project.repos.read().is_empty(),
+        is_git: project.repos.read().all().iter().any(|repo| repo.as_git().is_some()),
+        vcs: project.repos.read().primary().map(|repo| repo.kind()),
         settings,
         root: project.root.clone().into(),
         workspace,
@@ -406,6 +411,9 @@ pub fn set_settings(
     }
     if key == "vcs" || key == "vcs.git" || key == "vcs.git.executable" {
         host.apply_git_executable();
+    }
+    if key == "vcs" || key == "vcs.svn" || key == "vcs.svn.executable" {
+        host.apply_svn_executable();
     }
     if is_proxy {
         host.apply_proxy();

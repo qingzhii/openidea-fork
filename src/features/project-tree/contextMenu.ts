@@ -368,8 +368,9 @@ export function contextMenuItems(nodes: ProjectNode[]): MenuItem[] {
       ]),
   );
 
-  // Git › (`vcsAvailable` also covers repositories nested below a non-Git project root)
-  if (inWorkspace && (project?.isGit || getContext().vcsAvailable === true)) {
+  // Git › (`vcsAvailable` also covers repositories nested below a non-Git project root;
+  // `vcs` covers a Subversion working copy, which `isGit` misses)
+  if (inWorkspace && (project?.vcs || project?.isGit || getContext().vcsAvailable === true)) {
     const dirs = nodes.map((n) => n.dir);
     push(
       submenu(

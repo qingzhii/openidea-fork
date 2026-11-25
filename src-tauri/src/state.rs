@@ -165,7 +165,13 @@ impl AppState {
         let branch = if attached {
             None
         } else {
-            project.repos.read().primary().and_then(|r| r.branch_info().ok()).and_then(|b| b.head)
+            project
+                .repos
+                .read()
+                .primary()
+                .and_then(|repo| repo.as_git())
+                .and_then(|repo| repo.branch_info().ok())
+                .and_then(|b| b.head)
         };
         self.recent.touch(&project.root, branch)?;
         self.recent.rename(&project.root, Some(&info.display_name))?;

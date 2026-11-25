@@ -189,6 +189,8 @@ const UNTRANSLATED = new Set<string>([
   "Snowflake",
   "Spring",
   "Spring Boot",
+  "Subversion",
+  "SVN",
   "PostgreSQL",
   "Pyrefly",
   "Pyright",

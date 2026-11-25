@@ -386,12 +386,14 @@ impl Host {
         );
         documents.add_observer(phpstan.clone());
         let repos = Arc::new(RwLock::new(Repos::enclosing(&root)?));
-        for repo in repos.read().all() {
+        for repo in repos.read().all().iter().filter_map(|repo| repo.as_git()) {
             repo.set_execution_allowed(trusted.load(Ordering::Acquire));
         }
         let git_metadata = git_metadata_watch(&root, &sink);
         if let Some(watch) = &git_metadata {
-            watch.set_repos(repos.read().all(), &root);
+            let guard = repos.read();
+            let git_repos: Vec<&ide_vcs::Repo> = guard.all().iter().filter_map(|repo| repo.as_git()).collect();
+            watch.set_repos(&git_repos, &root);
         }
         // Shared handle: `unwatched_reason` is a live query on the watcher,
         // filled after `start` returns so the on-change callback can reach it.
@@ -494,13 +496,19 @@ impl Host {
                     // A repository was cloned / initialised / removed below the project:
                     // its `.git/HEAD` appeared or went. A linked worktree's `.git` is a
                     // plain gitfile, and that file is the only marker written inside the
-                    // worktree itself, so the `.git` path counts too.
+                    // worktree itself, so the `.git` path counts too. A Subversion
+                    // checkout / removal announces itself through its `.svn` directory;
+                    // its `wc.db` is the marker file, and its writes are the only events
+                    // a working copy already in the project keeps producing — they are
+                    // no-ops here while its root is known.
                     let known = repos.read().roots();
                     let mut git_dirs = changed.iter().chain(&batch.removed).chain(&batch.vcs).any(|p| {
                         let dir = if p.ends_with(".git/HEAD") {
                             p.parent().and_then(Path::parent)
-                        } else if p.ends_with(".git") {
+                        } else if p.ends_with(".git") || p.ends_with(".svn") {
                             p.parent()
+                        } else if p.ends_with(".svn/wc.db") {
+                            p.parent().and_then(Path::parent)
                         } else {
                             None
                         };
@@ -525,7 +533,8 @@ impl Host {
                     // written inside it before the watcher sees the new directory, its creation is
                     // the signal. A `git clone` / `git init` inside the project already arrives
                     // through the `.git` paths above; this covers the whole tree being brought in.
-                    git_dirs |= batch.created.iter().any(|p| p.join(".git").exists());
+                    git_dirs |=
+                        batch.created.iter().any(|p| p.join(".git").exists() || p.join(".svn").join("wc.db").is_file());
                     if git_dirs {
                         scan_repositories(
                             &root,
@@ -1038,7 +1047,8 @@ fn scan_repositories(
         Ok(found) => {
             if found.roots() != repos.read().roots() {
                 if let Some(watch) = git_metadata {
-                    watch.set_repos(found.all(), root);
+                    let git_repos: Vec<&ide_vcs::Repo> = found.all().iter().filter_map(|repo| repo.as_git()).collect();
+                    watch.set_repos(&git_repos, root);
                 }
                 *repos.write() = found;
                 sink.emit(IdeEvent::VcsChanged { root: root.to_path_buf().into() });
@@ -1111,15 +1121,26 @@ impl Project {
         (self.is_trusted() && !git.is_empty()).then(|| PathBuf::from(git))
     }
 
+    /// Settings › Version Control › Subversion › Path to SVN executable, this project's
+    /// value (its own layer over the global one); `None` when it is unset or the project
+    /// is not trusted. The svn backend carries no per-working-copy override, so the
+    /// effective value becomes the process default while this project is open
+    /// ([`ide_vcs::set_default_svn_executable`], applied by [`Project::repos`]).
+    pub fn svn_executable(&self) -> Option<PathBuf> {
+        let svn = self.settings.read_effective(|s| s.vcs.svn.executable.clone().unwrap_or_default());
+        (self.is_trusted() && !svn.trim().is_empty()).then(|| PathBuf::from(svn.trim().to_owned()))
+    }
+
     /// The project's git repositories.
     pub fn repos(&self) -> Repos {
         let repos = self.repos.read().clone();
         let trusted = self.is_trusted();
         let git = self.git_executable();
-        for repo in repos.all() {
+        for repo in repos.all().iter().filter_map(|repo| repo.as_git()) {
             repo.set_execution_allowed(trusted);
             repo.set_git_executable(git.as_deref());
         }
+        ide_vcs::set_default_svn_executable(self.svn_executable().as_deref());
         repos
     }
 
@@ -1128,18 +1149,17 @@ impl Project {
     /// to another repository).
     pub fn with_repo_at<T>(&self, at: Option<&Path>, f: impl FnOnce(&Repo) -> IdeResult<T>) -> IdeResult<T> {
         let repos = self.repos();
-        match at {
-            Some(root) => match repos.at_root(root) {
-                Some(repo) => self.run_in(repo, f),
-                None => {
-                    Err(IdeError::unavailable(format!("{} is not a git repository of the project", root.display())))
-                }
-            },
-            None => match repos.primary() {
-                Some(repo) => self.run_in(repo, f),
-                None => Err(IdeError::unavailable("project is not a git repository")),
-            },
-        }
+        let backend = match at {
+            Some(root) => repos.at_root(root).ok_or_else(|| {
+                IdeError::unavailable(format!("{} is not a repository of the project", root.display()))
+            })?,
+            None => repos.primary().ok_or_else(|| IdeError::unavailable("project is not a git repository"))?,
+        };
+        // Git-only surface: Subversion roots never reach git commands.
+        let repo = backend
+            .as_git()
+            .ok_or_else(|| IdeError::unavailable("this command is not available for Subversion working copies"))?;
+        self.run_in(repo, f)
     }
 
     pub fn open_external_log(&self, path: &Path) -> IdeResult<PathBuf> {
@@ -1173,7 +1193,7 @@ impl Project {
     }
 
     pub fn with_log_repo_of<T>(&self, path: &Path, f: impl FnOnce(&Repo) -> IdeResult<T>) -> IdeResult<T> {
-        if self.repos().for_path(path).is_some() {
+        if self.repos().for_path(path).is_some_and(|backend| backend.as_git().is_some()) {
             return self.with_repo_of(path, f);
         }
         let repo = self
@@ -1184,20 +1204,48 @@ impl Project {
             .max_by_key(|r| r.root().components().count())
             .cloned()
             .ok_or_else(|| IdeError::unavailable("path is not in an open Git log"))?;
-        f(&repo)
+        f(repo.as_ref())
     }
 
     /// Runs `f` with the repository `path` (a file or folder) belongs to.
     pub fn with_repo_of<T>(&self, path: &Path, f: impl FnOnce(&Repo) -> IdeResult<T>) -> IdeResult<T> {
         match self.repos().for_path(path) {
-            Some(repo) => self.run_in(repo, f),
+            Some(backend) => {
+                let repo = backend.as_git().ok_or_else(|| {
+                    IdeError::unavailable("this command is not available for Subversion working copies")
+                })?;
+                self.run_in(repo, f)
+            }
             None => Err(IdeError::unavailable(format!("{} is not in a git repository", path.display()))),
         }
     }
 
-    /// `with_repo_of` through the backend-agnostic Changes-view surface.
+    /// `with_repo_of` through the backend-agnostic Changes-view surface: both
+    /// Git repositories and Subversion working copies dispatch here.
     pub fn with_backend_of<T>(&self, path: &Path, f: impl FnOnce(&dyn Backend) -> IdeResult<T>) -> IdeResult<T> {
-        self.with_repo_of(path, |r| f(r as &dyn Backend))
+        match self.repos().for_path(path) {
+            Some(backend) => self.run_in_backend(&backend, f),
+            None => Err(IdeError::unavailable(format!("{} is not in a version-controlled folder", path.display()))),
+        }
+    }
+
+    /// Backend settings that only exist for Git; Subversion needs none.
+    fn run_in_backend<T>(
+        &self,
+        backend: &Arc<dyn Backend>,
+        f: impl FnOnce(&dyn Backend) -> IdeResult<T>,
+    ) -> IdeResult<T> {
+        if let Some(repo) = backend.as_git() {
+            let settings = self.settings.effective();
+            repo.set_ignored_names(settings.ignored_names());
+            repo.set_cli_status(settings.vcs.git.cli_status);
+            repo.set_automatic_shelf(
+                (settings.vcs.git.save_changes_policy == ide_core::workflow_settings::GitSaveChangesPolicy::Shelve)
+                    .then(|| ide_core::project_dir::path(&self.root, "shelf")),
+                (!settings.vcs.git.staging_area).then(|| self.root.clone()),
+            );
+        }
+        f(backend.as_ref())
     }
 
     fn run_in<T>(&self, repo: &Repo, f: impl FnOnce(&Repo) -> IdeResult<T>) -> IdeResult<T> {
@@ -1212,9 +1260,17 @@ impl Project {
         f(repo)
     }
 
-    /// `with_repo_at` through the backend-agnostic Changes-view surface.
+    /// `with_repo_at` through the backend-agnostic Changes-view surface: both
+    /// Git repositories and Subversion working copies dispatch here.
     pub fn with_backend_at<T>(&self, at: Option<&Path>, f: impl FnOnce(&dyn Backend) -> IdeResult<T>) -> IdeResult<T> {
-        self.with_repo_at(at, |r| f(r as &dyn Backend))
+        let repos = self.repos();
+        let backend = match at {
+            Some(root) => repos.at_root(root).ok_or_else(|| {
+                IdeError::unavailable(format!("{} is not a repository of the project", root.display()))
+            })?,
+            None => repos.primary().ok_or_else(|| IdeError::unavailable("project is not under version control"))?,
+        };
+        self.run_in_backend(&backend, f)
     }
 
     /// `with_log_repo_at` through the backend-agnostic Changes-view surface.
@@ -1223,22 +1279,69 @@ impl Project {
         at: Option<&Path>,
         f: impl FnOnce(&dyn Backend) -> IdeResult<T>,
     ) -> IdeResult<T> {
-        self.with_log_repo_at(at, |r| f(r as &dyn Backend))
+        if let Some(path) = at
+            && self.repos().at_root(path).is_none()
+        {
+            let repo = self
+                .external_log_repos
+                .read()
+                .iter()
+                .find(|r| r.root() == path)
+                .cloned()
+                .ok_or_else(|| IdeError::unavailable("external Git log is not open"))?;
+            return f(repo.as_ref());
+        }
+        self.with_backend_at(at, f)
     }
 
     /// `with_log_repo_of` through the backend-agnostic Changes-view surface.
     pub fn with_log_backend_of<T>(&self, path: &Path, f: impl FnOnce(&dyn Backend) -> IdeResult<T>) -> IdeResult<T> {
-        self.with_log_repo_of(path, |r| f(r as &dyn Backend))
+        if self.repos().for_path(path).is_some() {
+            return self.with_backend_of(path, f);
+        }
+        let repo = self
+            .external_log_repos
+            .read()
+            .iter()
+            .filter(|r| path.starts_with(r.root()))
+            .max_by_key(|r| r.root().components().count())
+            .cloned()
+            .ok_or_else(|| IdeError::unavailable("path is not in an open Git log"))?;
+        f(repo.as_ref())
     }
 
     /// `with_repo_recorded` through the backend-agnostic Changes-view surface.
+    /// Both backends get the Local History wrap: it only depends on file paths,
+    /// and Subversion's rollback permanently deletes unversioned files, so the
+    /// "Before" snapshots protect them the same way Git's do.
     pub fn with_backend_recorded<T>(
         &self,
         at: Option<&Path>,
         operation: Option<&str>,
         f: impl FnOnce(&dyn Backend) -> IdeResult<T>,
     ) -> IdeResult<T> {
-        self.with_repo_recorded(at, operation, |r| f(r as &dyn Backend))
+        let repos = self.repos();
+        let backend = match at {
+            Some(root) => repos.at_root(root).ok_or_else(|| {
+                IdeError::unavailable(format!("{} is not a repository of the project", root.display()))
+            })?,
+            None => repos.primary().ok_or_else(|| IdeError::unavailable("project is not under version control"))?,
+        };
+        if backend.as_git().is_some() {
+            return self.with_repo_recorded(at, operation, |r| f(r as &dyn Backend));
+        }
+        let Some(name) = operation else { return self.with_disk_sync(|| f(backend.as_ref())) };
+        self.history_label(&format!("Before {name}"));
+        if let Ok(changed) = backend.status() {
+            for file in changed.iter().take(HISTORY_BATCH_LIMIT) {
+                if let Err(e) = self.history.record_file(&file.path, &format!("Before {name}"), false) {
+                    tracing::debug!("local history: {e}");
+                }
+            }
+        }
+        let result = self.with_disk_sync(|| f(backend.as_ref()));
+        self.history_label(&format!("After {name}"));
+        result
     }
 
     /// Runs `f` with the project's primary git repository, or fails when the project is not under git.

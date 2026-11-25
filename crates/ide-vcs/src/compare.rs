@@ -128,7 +128,10 @@ impl Repos {
             if repositories.is_some_and(|roots| !roots.iter().any(|r| normalized(r) == normalized(&root.0))) {
                 continue;
             }
-            let repo = self.at_root(&root.0).expect("scope comes from registry");
+            // Compare is a Git-only surface; Subversion roots contribute nothing.
+            let Some(repo) = self.at_root(&root.0).expect("scope comes from registry").as_git() else {
+                continue;
+            };
             let _scope = repo.execution_scope();
             let mut missing_revision = false;
             let mut compare = || -> IdeResult<(String, Vec<WorkingTreeChange>)> {
@@ -522,7 +525,7 @@ mod tests {
             // The size it has in the index, so git has to read the file to tell whether it changed.
             write(&root, "src/move.txt", "more\n");
             let repos = Repos::discover(&root, &|_| false).unwrap();
-            for repo in repos.all() {
+            for repo in repos.all().iter().filter_map(|repo| repo.as_git()) {
                 repo.set_execution_allowed(false);
             }
             let result = repos.compare_paths(std::slice::from_ref(&root), "main", None, &CancellationToken::new());
@@ -559,7 +562,7 @@ mod tests {
         let command = format!("echo x > '{}'; cat", marker.to_str().unwrap().replace('\\', "/"));
         git(&sub, &["config", "filter.marker.clean", &command]);
         let repos = Repos::discover(&root, &|_| false).unwrap();
-        for repo in repos.all() {
+        for repo in repos.all().iter().filter_map(|repo| repo.as_git()) {
             repo.set_execution_allowed(false);
         }
         let mut ran = Vec::new();
@@ -605,7 +608,7 @@ mod tests {
             file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds)).unwrap();
         };
         let repos = Repos::discover(&root, &|_| false).unwrap();
-        let repo = repos.at_root(&root).unwrap();
+        let repo = repos.at_root(&root).unwrap().as_git().unwrap();
         repo.set_execution_allowed(false);
         let mut ran = Vec::new();
         touch(60);
@@ -639,10 +642,15 @@ mod tests {
         git(&sub, &["config", "diff.marker.command", &command]);
         git(&root, &["config", "diff.submodule", "diff"]);
         let repos = Repos::discover(&root, &|_| false).unwrap();
-        for repo in repos.all() {
+        for repo in repos.all().iter().filter_map(|repo| repo.as_git()) {
             repo.set_execution_allowed(false);
         }
-        let patch = repos.at_root(&root).unwrap().working_tree_patch(None, None, 1 << 20, &CancellationToken::new());
+        let patch = repos.at_root(&root).unwrap().as_git().unwrap().working_tree_patch(
+            None,
+            None,
+            1 << 20,
+            &CancellationToken::new(),
+        );
         let ran = marker.exists();
         let _ = std::fs::remove_file(&marker);
         let _ = Command::new("git").current_dir(&root).args(["--no-pager", "diff", "HEAD"]).output();
@@ -758,7 +766,7 @@ mod tests {
         git(&root, &["config", "gpg.program", &script]);
 
         let repos = Repos::discover(&root, &|_| false).unwrap();
-        let repo = repos.all().first().unwrap();
+        let repo = repos.all().first().unwrap().as_git().unwrap();
         repo.set_execution_allowed(false);
         let file = root.join("src/move.txt");
         type Call<'a> = (&'static str, Box<dyn Fn() + 'a>);

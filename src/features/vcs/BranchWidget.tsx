@@ -3,9 +3,9 @@ import { branchesByRepo } from "./multiRoot";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import clsx from "clsx";
 import { create } from "zustand";
-import type { Branch } from "@/bindings";
+import type { Branch, SvnInfo } from "@/bindings";
 import { executeAction } from "@/platform/actions";
-import { call, commands } from "@/platform/ipc";
+import { call, commands, isTauri } from "@/platform/ipc";
 import { useProject } from "@/platform/project";
 import { bindingsFor, normalizeBinding, registerKeyClaim, shortcutLabel, strokeOf } from "@/platform/keymap";
 import {
@@ -109,7 +109,8 @@ export function BranchWidget() {
   const pending = useVcs((s) => unfetchedBranch(s.unfetched, current, branch?.head, branch?.trackedTip));
   const open = useBranchesPopup((s) => s.open);
   const extensions = useBranchWidgetExtensions((s) => s.extensions);
-  if (!available || !branch) return null;
+  const kind = useVcs((s) => s.kind);
+  if (!available || !branch || kind === "svn") return null;
   // Another feature presents the current branch (the GitHub pull request on it).
   const presented = current === selected ? branchPresentation(extensions) : null;
   const repo = diverged && branchRoot ? repoName(branchRoot) : null;
@@ -180,6 +181,33 @@ export function BranchesPopupHost() {
   if (!open) return null;
   const anchor = document.querySelector("[data-branches-widget]") ?? { x: window.innerWidth / 2 - 160, y: 60 };
   return <BranchesPopup anchor={anchor} onClose={() => useBranchesPopup.setState({ open: false })} />;
+}
+
+/** Title bar widget for Subversion: the working copy's base revision (`r123`), with its URL. */
+export function SvnRevisionWidget() {
+  const available = useVcs((s) => s.available);
+  // Refreshed with the status: an update (and a switch of the selected repository) bumps it.
+  const version = useVcs((s) => s.version);
+  const [info, setInfo] = useState<SvnInfo | null>(null);
+  useEffect(() => {
+    if (!available || !isTauri()) return;
+    let live = true;
+    call(commands.vcsSvnInfo(currentRepo()))
+      .then((i) => live && setInfo(i))
+      .catch(() => live && setInfo(null));
+    return () => {
+      live = false;
+    };
+  }, [available, version]);
+  if (!available || !info) return null;
+  return (
+    <BarButton variant="title" className={styles.widget} tooltip={[info.url, info.root].filter(Boolean).join("\n")}>
+      <Icon name="commit" size={16} className={styles.icon} />
+      <span className={styles.name} data-toolbar-label="">
+        {`r${info.revision}`}
+      </span>
+    </BarButton>
+  );
 }
 
 const POPUP_ACTIONS: PopupAction[] = [

@@ -50,12 +50,13 @@ import { loadBranches, useVcs } from "./store";
 /** The Git window's tabs (they depend on the commit interface) and the one shown. */
 function useGitTabs() {
   const available = useVcs((s) => s.available);
+  const svn = useVcs((s) => s.kind === "svn");
   const modal = useWorkflowSettings((s) => !s.vcs.commit.nonModal);
   const combine = useWorkflowSettings((s) => s.vcs.git.combineStashAndShelf);
   const tab = useGitLog((s) => s.tab);
   const logTabs = useGitLog((s) => s.logTabs);
   const counts = useStashTabCounts(available && modal);
-  const tabs = gitTabs({ modal, combine, tab, logTabs, ...counts });
+  const tabs = gitTabs({ modal, combine, tab, logTabs, svn, ...counts });
   return { tabs, shown: shownTab(tab, tabs, combine) };
 }
 

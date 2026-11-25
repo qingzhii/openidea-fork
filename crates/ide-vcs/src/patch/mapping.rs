@@ -80,11 +80,14 @@ impl MappedPatch {
         paths: Option<&[String]>,
         mappings: &[PatchPathMapping],
     ) -> IdeResult<Self> {
-        let default = match repo_root {
+        let backend = match repo_root {
             Some(root) => repos.at_root(root),
             None => repos.primary(),
         }
         .ok_or_else(|| IdeError::unavailable("The patch repository is not in the project"))?;
+        // Patches apply through git; a Subversion root has no destination here.
+        let default =
+            backend.as_git().ok_or_else(|| IdeError::unavailable("The patch repository is not a Git repository"))?;
         let patch = normalized(patch)?;
         let sections = selected_sections(&patch, paths)?;
         if sections.is_empty() {

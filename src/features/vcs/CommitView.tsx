@@ -161,40 +161,43 @@ export function tabItems(tabs: readonly ContentTab[]): TabItem[] {
 export function useStashTabCounts(available: boolean) {
   const roots = useVcs((s) => s.roots);
   const version = useVcs((s) => s.version);
+  // Stashes are a Git concept; Subversion keeps only the shelves.
+  const svn = useVcs((s) => s.kind === "svn");
   const [stashCount, setStashCount] = useState(0);
   useEffect(() => {
     let live = true;
-    if (available)
+    if (available && !svn)
       void Promise.all(roots.map((r) => call(commands.vcsStashes(r))))
         .then((lists) => live && setStashCount(lists.reduce((n, list) => n + list.length, 0)))
         .catch(() => undefined);
     return () => {
       live = false;
     };
-  }, [available, roots, version]);
+  }, [available, svn, roots, version]);
   const shelfCount = useShelf((s) => s.shelves.length);
   useEffect(() => {
     if (available) void loadShelves().catch(() => undefined);
   }, [available]);
-  return { stashCount: available ? stashCount : 0, shelfCount };
+  return { stashCount: available && !svn ? stashCount : 0, shelfCount };
 }
 
 /** "Commit" / "Shelf" / "Stash" content tabs; they stand in for the tool window title. */
 export function CommitTabs() {
   const available = useVcs((s) => s.available);
+  const svn = useVcs((s) => s.kind === "svn");
   const combine = useWorkflowSettings((s) => s.vcs.git.combineStashAndShelf);
-  const tab = useCommit((s) => s.tab);
+  const tab = useShownCommitTab(svn, combine);
   const counts = useStashTabCounts(available);
   return (
     <Tabs
       variant="compact"
       className={styles.tabs}
-      activeId={stashTabOf(tab, combine)}
+      activeId={tab}
       onSelect={(id) => useCommit.setState({ tab: id as CommitTab })}
       aria-label="Commit"
       items={tabItems([
         { id: "changes", label: "Commit" },
-        ...(available ? stashTabs({ combine, tab, ...counts }) : []),
+        ...(available ? stashTabs({ combine, tab, svn, ...counts }) : []),
       ])}
     />
   );
@@ -202,11 +205,9 @@ export function CommitTabs() {
 
 export function CommitToolWindow() {
   const available = useVcs((s) => s.available);
+  const svn = useVcs((s) => s.kind === "svn");
   const combine = useWorkflowSettings((s) => s.vcs.git.combineStashAndShelf);
-  const tab = stashTabOf(
-    useCommit((s) => s.tab),
-    combine,
-  );
+  const tab = useShownCommitTab(svn, combine);
   if (!available)
     return (
       <EmptyState icon="commit" title="Version control is not configured">
@@ -214,6 +215,15 @@ export function CommitToolWindow() {
       </EmptyState>
     );
   return <div className={styles.root}>{tab === "changes" ? <ChangesPanel /> : <StashContent tab={tab} />}</div>;
+}
+
+/** The effective Commit-window tab: a Stash tab persisted under Git falls back to the Shelf under SVN. */
+function useShownCommitTab(svn: boolean, combine: boolean): CommitTab {
+  const tab = stashTabOf(
+    useCommit((s) => s.tab),
+    combine,
+  );
+  return svn && tab === "stashes" ? "shelf" : tab;
 }
 
 /** The Shelf, Stash or combined "Stashes and Shelves" tab. */

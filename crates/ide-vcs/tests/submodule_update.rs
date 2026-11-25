@@ -170,7 +170,7 @@ fn diff_entries_keep_committed_index_and_checkout_gitlinks_distinct() {
     follow(&module, &working);
 
     let repos = Repos::discover(&workspace, &|_| false).unwrap();
-    let parent = repos.for_path(&module).unwrap();
+    let parent = repos.for_path(&module).unwrap().as_git().unwrap().clone();
     assert_eq!(parent.root(), workspace);
     for (rev, expected) in [(revision.as_str(), &committed), ("HEAD", &committed), (":0", &staged), ("WT", &working)] {
         let entry = parent.diff_entry_at(&module, rev).unwrap().unwrap();
@@ -239,7 +239,9 @@ fn project_update_follows_detached_gitlinks_and_preserves_staged_changes() {
     let repos = Repos::discover(&workspace, &|_| false).unwrap();
     assert_eq!(repos.roots(), [workspace.clone(), module.clone(), nested.clone()]);
     for repo in repos.all() {
-        repo.set_execution_allowed(true);
+        if let Some(git) = repo.as_git() {
+            git.set_execution_allowed(true);
+        }
     }
     let plan = repos.project_update_plan(&[Some(workspace.clone())]).unwrap();
     let paths = plan.iter().map(|target| target.root.0.as_path()).collect::<Vec<_>>();
@@ -250,9 +252,9 @@ fn project_update_follows_detached_gitlinks_and_preserves_staged_changes() {
     assert_eq!(plan[2].parent.as_ref().unwrap().0, module);
     assert_eq!(repos.project_update_plan(&[Some(nested.clone())]).unwrap().len(), 1);
 
-    let parent = repos.at_root(&workspace).unwrap();
-    let child = repos.at_root(&module).unwrap();
-    let grandchild = repos.at_root(&nested).unwrap();
+    let parent = repos.at_root(&workspace).unwrap().as_git().unwrap().clone();
+    let child = repos.at_root(&module).unwrap().as_git().unwrap().clone();
+    let grandchild = repos.at_root(&nested).unwrap().as_git().unwrap().clone();
     let cancel = CancellationToken::new();
     let output = |_| {};
     assert_eq!(parent.head().unwrap().1.as_deref(), Some(root_before.as_str()));

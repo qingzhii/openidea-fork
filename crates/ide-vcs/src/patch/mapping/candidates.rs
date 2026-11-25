@@ -127,7 +127,7 @@ pub fn discover_patch_directories(
         choices.truncate(MENU_LIMIT);
         for entry in choices.iter_mut().take(checks_left) {
             checks_left -= 1;
-            let Some(repo) = repos.at_root(&entry.target.root) else { continue };
+            let Some(repo) = repos.at_root(&entry.target.root).and_then(|backend| backend.as_git()) else { continue };
             let mut rewritten = String::new();
             rewrite_headers(&mut rewritten, section, &entry.target.before, &entry.target.after, false);
             let group = ProjectPatchGroup { root: entry.target.root.clone(), prefix: String::new(), patch: rewritten };

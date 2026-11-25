@@ -32,7 +32,7 @@ import { controlLabel, controlOperation, inProgress, installOperationNoticeExpir
 import { annotationsShown, blameSlot } from "./blame";
 import { activateRevisionAnnotations } from "./annotateRevisionProvider";
 import { inlineBlame } from "./inlineBlame";
-import { BranchWidget, BranchesPopupHost, useBranchesPopup } from "./BranchWidget";
+import { BranchWidget, BranchesPopupHost, SvnRevisionWidget, useBranchesPopup } from "./BranchWidget";
 import { SyncCommitsPopupHost } from "./SyncCommitsPopup";
 import { clearUnstashConflictNotices, showConflictsDialog } from "./conflictsUi";
 import { registerCompareActions } from "./compare";
@@ -107,24 +107,40 @@ function trackMergeRebaseItem(): () => void {
 
 function trackTitleItem(): () => void {
   let dispose: (() => void) | null = null;
-  const sync = (available: boolean) => {
-    if (available && !dispose) {
-      dispose = registerTitleItem({
-        id: "vcs.branch",
-        title: "VCS Widget",
-        align: "left",
-        priority: 10,
-        component: BranchWidget,
-      });
-    } else if (!available && dispose) {
+  /** Which widget is registered: the Git branch one, or SVN's revision. */
+  let shown: "git" | "svn" | null = null;
+  const sync = (available: boolean, kind: "git" | "svn" | null) => {
+    const wanted = !available ? null : kind === "svn" ? "svn" : "git";
+    if (wanted !== shown && dispose) {
       dispose();
       dispose = null;
+      shown = null;
       useBranchesPopup.setState({ open: false });
     }
+    if (wanted && wanted !== shown) {
+      shown = wanted;
+      dispose =
+        wanted === "svn"
+          ? registerTitleItem({
+              id: "vcs.svnRevision",
+              title: "SVN Widget",
+              align: "left",
+              priority: 10,
+              component: SvnRevisionWidget,
+            })
+          : registerTitleItem({
+              id: "vcs.branch",
+              title: "VCS Widget",
+              align: "left",
+              priority: 10,
+              component: BranchWidget,
+            });
+    }
   };
-  sync(useVcs.getState().available);
-  const unsub = useVcs.subscribe((s, p) => {
-    if (s.available !== p.available) sync(s.available);
+  const s = useVcs.getState();
+  sync(s.available, s.kind);
+  const unsub = useVcs.subscribe((st, p) => {
+    if (st.available !== p.available || st.kind !== p.kind) sync(st.available, st.kind);
   });
   return () => {
     unsub();
@@ -365,6 +381,8 @@ export function activate(): () => void {
       order: 10,
       items: (_menu, { paths: [path] }) => {
         if (!path || !getContext().vcsAvailable) return [];
+        // Annotate drives git blame; Subversion has no annotate support yet.
+        if (useVcs.getState().kind === "svn") return [];
         const shown = editorsFor(path).some((h) => annotationsShown(h.view));
         return [
           {

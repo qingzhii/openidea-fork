@@ -13,9 +13,9 @@ pub async fn vcs_status(host: &Host, window: &str) -> IdeResult<Vec<FileStatus>>
         if repos.is_empty() {
             return Err(ide_core::IdeError::unavailable("project is not a git repository"));
         }
-        for r in repos.all() {
-            r.set_ignored_names(settings.ignored_names());
-            r.set_cli_status(settings.vcs.git.cli_status);
+        for repo in repos.all().iter().filter_map(|repo| repo.as_git()) {
+            repo.set_ignored_names(settings.ignored_names());
+            repo.set_cli_status(settings.vcs.git.cli_status);
         }
         repos.status()
     })
@@ -29,7 +29,7 @@ pub async fn vcs_ignored_files(host: &Host, window: &str) -> IdeResult<Vec<FileS
         let settings = project.settings.effective();
         let repos = project.repos();
         let ignored = settings.ignored_names();
-        for repo in repos.all() {
+        for repo in repos.all().iter().filter_map(|repo| repo.as_git()) {
             repo.set_ignored_names(ignored.clone());
         }
         repos.ignored_files()
@@ -48,9 +48,9 @@ pub async fn vcs_status_paths(host: &Host, window: &str, paths: Vec<std::path::P
         if repos.is_empty() {
             return Err(ide_core::IdeError::unavailable("project is not a git repository"));
         }
-        for r in repos.all() {
-            r.set_ignored_names(settings.ignored_names());
-            r.set_cli_status(settings.vcs.git.cli_status);
+        for repo in repos.all().iter().filter_map(|repo| repo.as_git()) {
+            repo.set_ignored_names(settings.ignored_names());
+            repo.set_cli_status(settings.vcs.git.cli_status);
         }
         repos.status_paths(&paths)
     })

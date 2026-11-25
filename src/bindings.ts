@@ -1371,6 +1371,11 @@ export const commands = {
 	name: string,
 	displayName: string,
 	isGit: boolean,
+	/**
+	 *  The version-control family of the primary repository, when the project
+	 *  is under version control at all (`git` / `svn`).
+	 */
+	vcs?: VcsKind | null,
 	settings: Settings_Serialize,
 	workspace?: Workspace_Serialize | null,
 	unity?: UnityProjectInfo | null,
@@ -2170,6 +2175,18 @@ export const commands = {
 	vcsStatus: () => typedError<FileStatus[], IdeError>(__TAURI_INVOKE("vcs_status")),
 	/**  Changes of `paths` only: the dirty-scope refresh after a watcher batch. */
 	vcsStatusPaths: (paths: string[]) => typedError<FileStatus[], IdeError>(__TAURI_INVOKE("vcs_status_paths", { paths })),
+	/**  Repairs a Subversion working copy's administrative state (`svn cleanup`). */
+	vcsSvnCleanup: (repo: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_cleanup", { repo })),
+	/**
+	 *  Information about the Subversion working copy at `repo` (the project's
+	 *  primary repository when `None`).
+	 */
+	vcsSvnInfo: (repo: string | null) => typedError<SvnInfo, IdeError>(__TAURI_INVOKE("vcs_svn_info", { repo })),
+	/**
+	 *  Updates the whole Subversion working copy root (`svn update`); the output
+	 *  goes back for the VCS console.
+	 */
+	vcsSvnUpdate: (repo: string | null, request: RequestId) => typedError<string, IdeError>(__TAURI_INVOKE("vcs_svn_update", { repo, request })),
 	vcsTags: (repo: string | null) => typedError<string[], IdeError>(__TAURI_INVOKE("vcs_tags", { repo })),
 	vcsUndoBranchCreation: (repo: string | null, name: string, created: BranchCreation, previousHead: {
 	branch: string | null,
@@ -11218,6 +11235,11 @@ export type ProjectInfo_Deserialize = {
 	name: string,
 	displayName?: string,
 	isGit: boolean,
+	/**
+	 *  The version-control family of the primary repository, when the project
+	 *  is under version control at all (`git` / `svn`).
+	 */
+	vcs?: VcsKind | null,
 	settings: Settings_Deserialize,
 	workspace?: Workspace_Deserialize | null,
 	unity?: UnityProjectInfo | null,
@@ -11229,6 +11251,11 @@ export type ProjectInfo_Serialize = {
 	name: string,
 	displayName: string,
 	isGit: boolean,
+	/**
+	 *  The version-control family of the primary repository, when the project
+	 *  is under version control at all (`git` / `svn`).
+	 */
+	vcs?: VcsKind | null,
 	settings: Settings_Serialize,
 	workspace?: Workspace_Serialize | null,
 	unity?: UnityProjectInfo | null,
@@ -13299,6 +13326,22 @@ export type StubLink = {
 
 export type SubmoduleRollbackSource = "head" | "index";
 
+/**  A Subversion working copy's `svn info`, for the UI to display. */
+export type SvnInfo = {
+	/**  The working copy's base revision (`"123"`). */
+	revision: string,
+	/**  The URL the working-copy root was checked out from. */
+	url: string,
+	/**  The working-copy root. */
+	root: string,
+};
+
+/**  Version Control › Subversion. */
+export type SvnSettings = {
+	/**  Path to the svn executable; unset = auto-detect. */
+	executable?: string | null,
+};
+
 export type SymbolFilter = "all" | 
 /**  Go to Class (⌘O): classes, interfaces, structs, enums, traits, type aliases. */
 "types";
@@ -13979,6 +14022,12 @@ export type VcsConfirmationSettings = {
 };
 
 /**
+ *  The version-control family a repository belongs to (`git` / `svn`), so the
+ *  host can gate backend-specific UI without downcasting.
+ */
+export type VcsKind = "git" | "svn";
+
+/**
  *  Directory Mappings on top of repository detection. Paths are relative to the project
  *  root (`.` for the root itself) or absolute outside it.
  */
@@ -13993,6 +14042,12 @@ export type VcsMappings = {
 export type VcsRoot = {
 	/**  Worktree root. */
 	root: IpcPath,
+	/**  Which backend this root belongs to. */
+	kind: VcsRootKind,
+	/**  Subversion only: the repository root URL the working copy checks out from. */
+	svnUrl?: string | null,
+	/**  Subversion only: the working copy's base revision at discovery time. */
+	svnRevision?: number | null,
 	/**  Root representing all mapped worktrees of the same Git repository in branch lists. */
 	branchRoot: IpcPath,
 	/**  Merge / rebase / cherry-pick / revert in progress. */
@@ -14011,6 +14066,9 @@ export type VcsRoot = {
 	resolvedConflicts?: IpcPath[],
 };
 
+/**  The version-control family of a [`VcsRoot`]. */
+export type VcsRootKind = "git" | "svn";
+
 /**  Version Control (main page) and its sub-pages. */
 export type VcsSettings = {
 	/**  Colour folders that contain changed files (project tree, tabs). */
@@ -14022,6 +14080,7 @@ export type VcsSettings = {
 	limitHistory?: boolean,
 	historyLimit?: number,
 	git?: GitSettings,
+	svn?: SvnSettings,
 	commit?: CommitSettings,
 	confirmation?: VcsConfirmationSettings,
 	shelf?: ShelfSettings,

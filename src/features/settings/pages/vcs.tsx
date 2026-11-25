@@ -50,9 +50,10 @@ function HistoryLimitRow() {
   );
 }
 
-type VcsChoice = "git" | "none";
+type VcsChoice = "git" | "svn" | "none";
 const VCS_OPTIONS: SelectOption<VcsChoice>[] = [
   { value: "git", label: "Git" },
+  { value: "svn", label: "SVN" },
   { value: "none", label: "<none>" },
 ];
 
@@ -109,7 +110,7 @@ function MappingsTable() {
     const detectedKeys = new Set((detected ?? []).map((path) => mappingKey(root, path)));
     const registeredKeys = new Set(registered.map((path) => mappingKey(root, path)));
     const keys = new Set([...detectedKeys, ...added, ...excluded]);
-    if (!keys.size && detected === null && project?.isGit) keys.add(".");
+    if (!keys.size && detected === null && (project?.vcs || project?.isGit)) keys.add(".");
     return [...keys]
       .sort((a, b) => (a === "." ? -1 : b === "." ? 1 : a.localeCompare(b)))
       .map((key) => ({
@@ -119,7 +120,7 @@ function MappingsTable() {
         knownRoot: detectedKeys.has(key) || registeredKeys.has(key),
         unregistered: excluded.includes(key),
       }));
-  }, [root, detected, registered, added, excluded, project?.isGit]);
+  }, [root, detected, registered, added, excluded, project?.vcs, project?.isGit]);
 
   const activeRows = rows.filter((row) => !row.unregistered);
   const unregisteredRows = rows.filter((row) => row.unregistered);
@@ -338,6 +339,16 @@ function GitExecutableRow() {
         </div>
       </Row>
     </div>
+  );
+}
+
+function SvnExecutableRow() {
+  const [path, setPath] = useSetting<string>("vcs.svn.executable");
+  const id = useId();
+  return (
+    <Row label="Path to SVN executable" htmlFor={id} hint="Leave empty to use the svn command on the PATH.">
+      <Input id={id} mono value={path} placeholder="Auto-detected" onChange={(e) => setPath(e.target.value)} />
+    </Row>
   );
 }
 
@@ -1145,6 +1156,25 @@ export const VCS_PAGES: PageSpec[] = [
                 ]}
               />
             ),
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: "vcs.svn",
+    title: "Subversion",
+    order: 9,
+    projectScope: true,
+    keywords: ["svn", "subversion", "executable", "update"],
+    sections: [
+      {
+        options: [
+          {
+            kind: "custom",
+            label: "Path to SVN executable",
+            keywords: ["svn", "path", "auto-detected"],
+            component: SvnExecutableRow,
           },
         ],
       },

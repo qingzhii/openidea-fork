@@ -81,6 +81,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ropey = "1.6"
 encoding_rs = "0.8"
 chardetng = "0.1"
+roxmltree = "0.20"
 ignore = "0.4"
 base64 = "0.22"
 globset = "0.4"

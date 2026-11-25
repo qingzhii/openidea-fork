@@ -12,6 +12,15 @@ use std::time::Instant;
 pub use text_encoding::TextEncoding;
 pub use write::PendingChange;
 
+/// The version-control family a repository belongs to (`git` / `svn`), so the
+/// host can gate backend-specific UI without downcasting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum VcsKind {
+    Git,
+    Svn,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeKind {
@@ -942,8 +951,10 @@ mod push_preview;
 mod push_report;
 mod rebase_editor;
 mod ref_decorations;
+pub mod svn;
 mod worktree_config;
 pub use ops::UNSTAGED_CHANGES_PREVENT_REBASE;
+pub use svn::{SvnWorkingCopy, set_default_svn_executable, svn_executable, svnadmin_executable};
 mod incoming;
 mod refs;
 mod remotes;

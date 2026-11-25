@@ -106,8 +106,12 @@ rebase or cherry-pick in progress (`operationInProgress`).",
             let list: Vec<Value> = roots
                 .into_iter()
                 .map(|r| {
+                    let vcs_name = match r.kind {
+                        crate::ops::vcs::VcsRootKind::Git => "Git",
+                        crate::ops::vcs::VcsRootKind::Svn => "SVN",
+                    };
                     let mut v =
-                        json!({ "pathRelativeToProject": relative_to_project(&call, &r.root), "vcsName": "Git" });
+                        json!({ "pathRelativeToProject": relative_to_project(&call, &r.root), "vcsName": vcs_name });
                     if let Some(head) = r.head {
                         v["branch"] = head.into();
                     }
@@ -258,6 +262,8 @@ By default all Git repositories are returned.",
             let repos: Vec<(PathBuf, Option<String>)> = crate::ops::vcs::vcs_roots(&host, &call.window)
                 .await?
                 .into_iter()
+                // A Git tool: Subversion working copies have no porcelain status.
+                .filter(|r| r.kind == crate::ops::vcs::VcsRootKind::Git)
                 .map(|r| (r.root.into_path_buf(), r.head))
                 .collect();
             let wanted = call.opt_str("repositoryPathRelativeToProject")?;

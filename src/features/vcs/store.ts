@@ -10,7 +10,7 @@
  */
 import { onWorkflowSettingsChange, workflowSettings } from "@/platform/workflowSettings";
 import { create } from "zustand";
-import type { Branch, BranchInfo, FileStatus, Stash, TrackedTip, UnfetchedBranch } from "@/bindings";
+import type { Branch, BranchInfo, FileStatus, Stash, TrackedTip, UnfetchedBranch, VcsRootKind } from "@/bindings";
 import { call, commands, isTauri, onIdeEvent } from "@/platform/ipc";
 import { setContext } from "@/platform/context";
 import { useProject } from "@/platform/project";
@@ -27,6 +27,8 @@ export interface RepoHead {
 export interface VcsState {
   /** The open project is a git repository. */
   available: boolean;
+  /** The version-control family of the primary repository (`git` / `svn`); null until known. */
+  kind: VcsRootKind | null;
   root: string | null;
   /** Repository roots, the project's own repository first. */
   roots: string[];
@@ -64,6 +66,7 @@ export interface VcsState {
 
 const initial: VcsState = {
   available: false,
+  kind: null,
   root: null,
   roots: [],
   hasRemotes: null,
@@ -261,14 +264,18 @@ export function refreshNow(): Promise<void> {
     useVcs.setState({ loading: true });
     try {
       const s = useVcs.getState();
-      const scoped = Promise.all([
-        call(commands.vcsBranchInfo(s.repo)),
-        s.branchesLoaded ? call(commands.vcsBranches(s.repo)) : Promise.resolve(s.branches),
-        s.stashesLoaded ? call(commands.vcsStashes(s.repo)) : Promise.resolve(s.stashes),
-      ]).then(
-        (values) => ({ values }),
-        (error: unknown) => ({ error }),
-      );
+      // Subversion has no branch/stash model; the Changes view is the surface.
+      const scoped: Promise<{ values: [BranchInfo | null, Branch[], Stash[]] } | { error: unknown }> =
+        s.kind === "svn"
+          ? Promise.resolve({ values: [null, [], []] })
+          : Promise.all([
+              call(commands.vcsBranchInfo(s.repo)),
+              s.branchesLoaded ? call(commands.vcsBranches(s.repo)) : Promise.resolve(s.branches),
+              s.stashesLoaded ? call(commands.vcsStashes(s.repo)) : Promise.resolve(s.stashes),
+            ]).then(
+              (values) => ({ values }),
+              (error: unknown) => ({ error }),
+            );
       const [vcsRoots, status, selected] = await Promise.all([
         call(commands.vcsRoots()),
         call(commands.vcsStatus()).then(
@@ -278,9 +285,14 @@ export function refreshNow(): Promise<void> {
         scoped,
       ]);
       if (generation !== projectGeneration) return;
+      const kind = vcsRoots[0]?.kind ?? null;
+      if (kind !== s.kind) {
+        useVcs.setState({ kind });
+        setContext("vcsKind", kind ?? "");
+      }
       const roots = vcsRoots.map((r) => r.root);
       if (!roots.length) {
-        useVcs.setState({ ...initial, root: s.root, version: s.version });
+        useVcs.setState({ ...initial, root: s.root, kind: s.kind, version: s.version });
         setContext("vcsAvailable", false);
         setContext("vcsShallowRepositories", "");
         setFileDecorations("vcs", new Map());
@@ -502,14 +514,18 @@ export function installVcsStore(): () => void {
   });
   const onProject = () => {
     const project = useProject.getState().project;
-    const available = !!project?.isGit;
+    const available = !!project?.isGit || !!project?.vcs;
+    // Projects recorded before the field existed are Git; the first refresh
+    // refines it from the roots.
+    const kind = project?.vcs ?? (project?.isGit ? "git" : null);
     const root = project?.root ?? null;
     if (useVcs.getState().root === root && useVcs.getState().available === available) return;
     projectGeneration++;
     clearTimeout(timer);
     pendingPaths.clear();
-    useVcs.setState({ ...initial, available, root, version: useVcs.getState().version + 1 });
+    useVcs.setState({ ...initial, available, kind, root, version: useVcs.getState().version + 1 });
     setContext("vcsAvailable", available);
+    setContext("vcsKind", kind ?? "");
     setContext("vcsShallowRepositories", "");
     setFileDecorations("vcs", new Map());
     if (available && isTauri()) void refreshNow();
@@ -548,6 +564,7 @@ export function installVcsStore(): () => void {
     offVcs();
     offFs();
     setContext("vcsAvailable", false);
+    setContext("vcsKind", "");
     setContext("vcsFetchDisabled", false);
     setContext("vcsShallowRepositories", "");
     setFileDecorations("vcs", new Map());

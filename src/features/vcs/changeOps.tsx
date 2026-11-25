@@ -368,7 +368,9 @@ async function prepareAndCommit(
     if (onlyChecks || review.problems.length) useCommit.setState({ checkResult: review });
   }
   if (onlyChecks || !current()) return;
+  // Subversion commits carry no client-side author config.
   if (
+    useVcs.getState().kind !== "svn" &&
     !(await ensureCommitIdentity(
       selection.repositories.map((r) => r.root || null),
       amend,

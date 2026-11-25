@@ -23,6 +23,8 @@ export interface StashTabsInput {
   stashCount: number;
   /** The selected tab: an empty Shelf tab stays while it is shown. */
   tab: string;
+  /** Subversion has no stash model: the Stash tab is not offered. */
+  svn?: boolean;
 }
 
 /** The tab a Shelf / Stash request lands on (the combined one when they are combined). */
@@ -31,7 +33,9 @@ export function stashTabOf(tab: CommitTab, combine: boolean): CommitTab {
 }
 
 /** Shelf and Stash tabs (Shelf only when there are shelves), or the combined one. */
-export function stashTabs({ combine, shelfCount, stashCount, tab }: StashTabsInput): ContentTab[] {
+export function stashTabs({ combine, shelfCount, stashCount, tab, svn }: StashTabsInput): ContentTab[] {
+  if (svn)
+    return shelfCount || tab === "shelf" ? [{ id: "shelf", label: "Shelf", count: shelfCount || undefined }] : [];
   if (combine) return [{ id: "stashes", label: "Stashes and Shelves", count: stashCount + shelfCount || undefined }];
   return [
     ...(shelfCount || tab === "shelf" ? [{ id: "shelf", label: "Shelf", count: shelfCount || undefined }] : []),
@@ -59,7 +63,8 @@ export function gitTabs(input: GitTabsInput): ContentTab[] {
       .filter((t) => t.location !== "editor")
       .map((t) => ({ id: t.id, label: logTabLabel(t), closable: true })),
     { id: "console", label: "Console" },
-    { id: "worktrees", label: "Worktrees" },
+    // Worktrees are a git-worktree listing; Subversion has no such model.
+    ...(input.svn ? [] : [{ id: "worktrees", label: "Worktrees" }]),
   ];
 }
 

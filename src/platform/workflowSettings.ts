@@ -57,6 +57,11 @@ export interface GitSettingsValid {
   cliStatus: boolean;
 }
 
+export interface SvnSettingsValid {
+  /** Path to the svn executable; empty = auto-detect. */
+  executable: string;
+}
+
 export interface CommitSettingsValid {
   nonModal: boolean;
   includeChangesByDefault: boolean;
@@ -99,6 +104,7 @@ export interface VcsSettingsValid {
   limitHistory: boolean;
   historyLimit: number;
   git: GitSettingsValid;
+  svn: SvnSettingsValid;
   commit: CommitSettingsValid;
   confirmation: {
     onCreate: VcsConfirm;
@@ -328,6 +334,7 @@ export const DEFAULT_WORKFLOW: WorkflowSettings = {
       stagingArea: false,
       cliStatus: false,
     },
+    svn: { executable: "" },
     commit: {
       nonModal: true,
       includeChangesByDefault: true,
@@ -475,6 +482,7 @@ export function validateVcs(raw: unknown): VcsSettingsValid {
   const v = obj(raw);
   const g = obj(v.git);
   const annotate = obj(g.annotate);
+  const svn = obj(v.svn);
   const c = obj(v.commit);
   const conf = obj(v.confirmation);
   const L = WORKFLOW_LIMITS;
@@ -517,6 +525,9 @@ export function validateVcs(raw: unknown): VcsSettingsValid {
       stashDiffTarget: oneOf(g.stashDiffTarget, ["local", "parent"] as const, d.git.stashDiffTarget),
       stagingArea: bool(g.stagingArea, d.git.stagingArea),
       cliStatus: bool(g.cliStatus, d.git.cliStatus),
+    },
+    svn: {
+      executable: text(svn.executable, d.svn.executable).trim(),
     },
     commit: {
       nonModal: bool(c.nonModal, d.commit.nonModal),

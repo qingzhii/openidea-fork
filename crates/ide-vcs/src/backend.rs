@@ -18,8 +18,8 @@
 //! support lands, methods that turn out to be needed generically move here.
 
 use crate::{
-    BlameLine, BlockHistory, ChangedFile, Commit, CommitOptions, FileStatus, LineHunk, LogQuery, PendingChange, Repo,
-    RevisionChange, TextEncoding,
+    BlameLine, BlockHistory, ChangedFile, Commit, CommitOptions, FileStatus, LineHunk, LogDetails, LogQuery,
+    PendingChange, Repo, RevisionChange, SvnWorkingCopy, TextEncoding, VcsKind,
 };
 use ide_core::{CancellationToken, IdeResult};
 use std::path::{Path, PathBuf};
@@ -113,6 +113,10 @@ pub trait Backend: Send + Sync {
     /// The per-file changes a set of commits made, for a combined diff.
     fn commits_changes(&self, commits: &[String]) -> IdeResult<Vec<RevisionChange>>;
 
+    /// A revision's full message (the Log detail view). `containing_branches`
+    /// and the signature fields are Git's; other backends leave them empty.
+    fn log_details(&self, revision: &str) -> IdeResult<LogDetails>;
+
     /// Changes between two revisions.
     fn diff_revisions(&self, from: &str, to: &str) -> IdeResult<Vec<ChangedFile>>;
 
@@ -186,11 +190,23 @@ pub trait Backend: Send + Sync {
     fn as_git(&self) -> Option<&Repo> {
         None
     }
+
+    /// The concrete Subversion working copy, when this backend is one.
+    fn as_svn(&self) -> Option<&SvnWorkingCopy> {
+        None
+    }
+
+    /// Which version-control family this backend belongs to.
+    fn kind(&self) -> VcsKind;
 }
 
 impl Backend for Repo {
     fn root(&self) -> &Path {
         Repo::root(self)
+    }
+
+    fn kind(&self) -> VcsKind {
+        VcsKind::Git
     }
 
     fn status(&self) -> IdeResult<Vec<FileStatus>> {
@@ -264,6 +280,10 @@ impl Backend for Repo {
 
     fn commits_changes(&self, commits: &[String]) -> IdeResult<Vec<RevisionChange>> {
         Repo::commits_changes(self, commits)
+    }
+
+    fn log_details(&self, revision: &str) -> IdeResult<LogDetails> {
+        Repo::log_details(self, revision)
     }
 
     fn diff_revisions(&self, from: &str, to: &str) -> IdeResult<Vec<ChangedFile>> {

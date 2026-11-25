@@ -57,7 +57,7 @@ impl MetadataWatch {
 
     /// Watches the metadata of `repos` that the project watcher of `covered` doesn't report:
     /// git directories outside it, and submodule git directories (`.git/modules/…`) inside it.
-    pub fn set_repos(&self, repos: &[Arc<Repo>], covered: &Path) {
+    pub fn set_repos(&self, repos: &[&Repo], covered: &Path) {
         let covered = dunce::canonicalize(covered).unwrap_or_else(|_| covered.to_path_buf());
         let mut wanted = BTreeMap::new();
         for repo in repos {
@@ -169,7 +169,7 @@ mod tests {
                 let seen = seen.clone();
                 MetadataWatch::new(move |paths| seen.lock().unwrap().extend(paths)).unwrap()
             };
-            watch.set_repos(std::slice::from_ref(&repo), &project);
+            watch.set_repos(&[repo.as_ref()], &project);
             assert!(!watch.watched_dirs().is_empty(), "{}", project.display());
             std::thread::sleep(Duration::from_millis(300));
             std::fs::write(project.join("a.txt"), project.to_string_lossy().as_bytes()).unwrap();
@@ -214,9 +214,9 @@ mod tests {
         git(&root, &["init", "-q"]);
         let repo = Arc::new(Repo::discover(&root).unwrap().unwrap());
         let watch = MetadataWatch::new(|_| {}).unwrap();
-        watch.set_repos(std::slice::from_ref(&repo), &root);
+        watch.set_repos(&[repo.as_ref()], &root);
         assert!(watch.watched_dirs().is_empty());
-        watch.set_repos(std::slice::from_ref(&repo), &root.join("elsewhere"));
+        watch.set_repos(&[repo.as_ref()], &root.join("elsewhere"));
         assert_eq!(watch.watched_dirs().len(), 2, "{:?}", watch.watched_dirs());
         watch.set_repos(&[], &root);
         assert!(watch.watched_dirs().is_empty());

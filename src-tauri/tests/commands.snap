@@ -800,6 +800,9 @@ vcs_stash_push                               trusted            project_host bin
 vcs_stashes                                  always             project_host bindings async
 vcs_status                                   always             project_host bindings async
 vcs_status_paths                             always             project_host bindings async
+vcs_svn_cleanup                              trusted            project_host bindings async
+vcs_svn_info                                 always             project_host bindings async
+vcs_svn_update                               trusted            project_host bindings async
 vcs_tags                                     always             project_host bindings async
 vcs_undo_branch_creation                     trusted            project_host bindings async
 vcs_undo_commit                              trusted            project_host bindings async

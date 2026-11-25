@@ -135,7 +135,7 @@ impl LogAccess {
     fn with_log_repo_at<T>(&self, at: Option<&Path>, f: impl FnOnce(&Repo) -> IdeResult<T>) -> IdeResult<T> {
         if let Some(repo) = &self.external {
             repo.enable_log_index(&self.cache);
-            return f(repo);
+            return f(repo.as_ref());
         }
         self.project
             .as_ref()
@@ -143,10 +143,27 @@ impl LogAccess {
             .with_log_repo_at(at, f)
     }
 
-    /// `with_log_repo_at` through the backend-agnostic Changes-view surface.
+    /// `with_log_repo_at` through the backend-agnostic Changes-view surface:
+    /// external logs remain Git repositories (they are opened as such), the
+    /// project's roots dispatch by backend.
     fn with_log_backend_at<T>(&self, at: Option<&Path>, f: impl FnOnce(&dyn Backend) -> IdeResult<T>) -> IdeResult<T> {
-        self.with_log_repo_at(at, |r| f(r as &dyn Backend))
+        if let Some(repo) = &self.external {
+            repo.enable_log_index(&self.cache);
+            return f(repo.as_ref());
+        }
+        self.project
+            .as_ref()
+            .ok_or_else(|| ide_core::IdeError::unavailable("path is not in an open log"))?
+            .with_log_backend_at(at, f)
     }
+}
+
+/// The version-control family of a [`VcsRoot`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum VcsRootKind {
+    Git,
+    Svn,
 }
 
 /// A repository of the project (IDEA's VCS root).
@@ -155,6 +172,16 @@ impl LogAccess {
 pub struct VcsRoot {
     /// Worktree root.
     pub root: ide_core::IpcPath,
+    /// Which backend this root belongs to.
+    pub kind: VcsRootKind,
+    /// Subversion only: the repository root URL the working copy checks out from.
+    #[serde(default)]
+    #[specta(optional)]
+    pub svn_url: Option<String>,
+    /// Subversion only: the working copy's base revision at discovery time.
+    #[serde(default)]
+    #[specta(optional)]
+    pub svn_revision: Option<u64>,
     /// Root representing all mapped worktrees of the same Git repository in branch lists.
     pub branch_root: ide_core::IpcPath,
     /// Merge / rebase / cherry-pick / revert in progress.
@@ -403,14 +430,31 @@ fn per_repo(
     Ok(())
 }
 
-/// `per_repo` through the backend-agnostic Changes-view surface.
+/// `per_repo` through the backend-agnostic Changes-view surface. Recorded
+/// operations (e.g. Rollback) get the Local History wrap for both backends —
+/// Subversion's rollback deletes unversioned files, so it needs the same
+/// "Before" snapshots Git's does.
 fn per_backend(
     project: &Project,
     paths: &[PathBuf],
     recorded: Option<&str>,
     f: impl Fn(&dyn Backend, &[PathBuf]) -> IdeResult<()>,
 ) -> IdeResult<()> {
-    per_repo(project, paths, recorded, |r, paths| f(r as &dyn Backend, paths))
+    let groups = project.repos().group(paths);
+    if groups.is_empty() {
+        return match recorded {
+            Some(name) => project.with_backend_recorded(None, Some(name), |r| f(r, paths)),
+            None => project.with_backend_at(None, |r| f(r, paths)),
+        };
+    }
+    for (repo, paths) in groups {
+        let result = match recorded {
+            Some(name) => project.with_backend_recorded(Some(repo.root()), Some(name), |r| f(r, &paths)),
+            None => project.with_disk_sync(|| f(repo.as_ref(), &paths)),
+        };
+        result?;
+    }
+    Ok(())
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> IdeResult<T> + Send + 'static) -> IdeResult<T> {
@@ -526,39 +570,68 @@ pub async fn vcs_roots(host: &Host, window: &str) -> IdeResult<Vec<VcsRoot>> {
         let primary = repos.primary().map(|r| r.root().to_path_buf());
         let mut all: Vec<_> = repos.all().iter().collect();
         all.sort_by_key(|r| Some(r.root()) != primary.as_deref());
-        let roots: Vec<_> = all.into_iter().map(|repo| (repo, repo.metadata_dirs().ok())).collect();
         let mut branch_roots = std::collections::HashMap::new();
-        for (repo, dirs) in &roots {
-            if let Some([git_dir, common_dir]) = dirs {
-                let first = branch_roots.entry(common_dir).or_insert(repo.root());
+        for repo in &all {
+            if let Some(git) = repo.as_git()
+                && let Ok([git_dir, common_dir]) = git.metadata_dirs()
+            {
+                let first = branch_roots.entry(common_dir.clone()).or_insert(git.root());
                 if git_dir == common_dir {
-                    *first = repo.root();
+                    *first = git.root();
                 }
             }
         }
-        Ok(roots
+        Ok(all
             .iter()
-            .map(|(r, dirs)| {
-                let branch_root = dirs.as_ref().and_then(|[_, common_dir]| branch_roots.get(common_dir));
-                let (head, head_commit) = r.head().unwrap_or_default();
-                let operation = r.operation().ok().flatten();
-                let interactive_rebase = operation.as_deref() == Some("rebase") && r.is_interactive_rebase();
+            .map(|r| {
+                let root = r.root();
+                let Some(git) = r.as_git() else {
+                    // Subversion root: no branch/operation model; the base
+                    // revision doubles as the "head" line the UI can show.
+                    let (svn_url, svn_revision) = match r.as_svn() {
+                        Some(svn) => (svn.repo_url().ok(), svn.revision().ok()),
+                        None => (None, None),
+                    };
+                    let head = svn_revision.map(|rev| format!("r{rev}"));
+                    return VcsRoot {
+                        root: root.into(),
+                        kind: VcsRootKind::Svn,
+                        svn_url,
+                        svn_revision,
+                        branch_root: root.into(),
+                        operation: None,
+                        interactive_rebase: false,
+                        head,
+                        head_commit: None,
+                        shallow: false,
+                        has_remotes: None,
+                        resolved_conflicts: Vec::new(),
+                    };
+                };
+                let branch_root =
+                    git.metadata_dirs().ok().and_then(|[_, common_dir]| branch_roots.get(&common_dir).copied());
+                let (head, head_commit) = git.head().unwrap_or_default();
+                let operation = git.operation().ok().flatten();
+                let interactive_rebase = operation.as_deref() == Some("rebase") && git.is_interactive_rebase();
                 let resolved_conflicts = operation
                     .as_ref()
-                    .and_then(|_| r.resolved_conflicts().ok())
+                    .and_then(|_| git.resolved_conflicts().ok())
                     .unwrap_or_default()
                     .into_iter()
                     .map(Into::into)
                     .collect();
                 VcsRoot {
-                    root: r.root().into(),
-                    branch_root: branch_root.copied().unwrap_or_else(|| r.root()).into(),
+                    root: root.into(),
+                    kind: VcsRootKind::Git,
+                    svn_url: None,
+                    svn_revision: None,
+                    branch_root: branch_root.unwrap_or(root).into(),
                     operation,
                     interactive_rebase,
                     head,
                     head_commit,
-                    shallow: r.is_shallow().unwrap_or(false),
-                    has_remotes: trusted.then(|| r.has_remotes().ok()).flatten(),
+                    shallow: git.is_shallow().unwrap_or(false),
+                    has_remotes: trusted.then(|| git.has_remotes().ok()).flatten(),
                     resolved_conflicts,
                 }
             })
@@ -753,9 +826,11 @@ pub async fn vcs_log(host: &Host, window: &str, repo: Option<PathBuf>, query: Lo
     let cancel =
         request.map_or_else(ide_core::CancellationToken::new, |id| host.begin_project_read_request(window, id));
     let result = blocking(move || {
-        project.with_log_repo_at(repo.as_deref(), |r| {
-            r.enable_log_index(&project.cache);
-            (r as &dyn Backend).log(&query, &cancel)
+        project.with_log_backend_at(repo.as_deref(), |r| {
+            if let Some(git) = r.as_git() {
+                git.enable_log_index(&project.cache);
+            }
+            r.log(&query, &cancel)
         })
     })
     .await;
@@ -825,7 +900,7 @@ pub async fn vcs_log_details(
     revision: String,
 ) -> IdeResult<LogDetails> {
     let project = LogAccess::new(host, window, repo.as_deref());
-    blocking(move || project.with_log_repo_at(repo.as_deref(), |r| r.log_details(&revision))).await
+    blocking(move || project.with_log_backend_at(repo.as_deref(), |r| r.log_details(&revision))).await
 }
 
 #[command(trust = always)]
@@ -839,9 +914,21 @@ pub async fn vcs_log_details_batch(
     let project = LogAccess::new(host, window, repo.as_deref());
     let cancel = host.begin_project_read_request(window, request);
     let result = blocking(move || {
-        project.with_log_repo_at(repo.as_deref(), |r| {
-            r.enable_log_index(&project.cache);
-            r.log_details_batch_cancellable(&revisions, &cancel)
+        project.with_log_backend_at(repo.as_deref(), |r| match r.as_git() {
+            Some(git) => {
+                git.enable_log_index(&project.cache);
+                git.log_details_batch_cancellable(&revisions, &cancel)
+            }
+            // Without Git's log index the batch is a loop of single reads.
+            None => revisions
+                .iter()
+                .map(|revision| {
+                    if cancel.is_cancelled() {
+                        return Err(ide_core::IdeError::cancelled());
+                    }
+                    r.log_details(revision)
+                })
+                .collect(),
         })
     })
     .await;
@@ -2579,6 +2666,78 @@ pub async fn vcs_diff_revisions(
     blocking(move || project.with_log_backend_at(repo.as_deref(), |r| r.diff_revisions(&from, &to))).await
 }
 
+/// Updates the whole Subversion working copy root (`svn update`); the output
+/// goes back for the VCS console.
+#[command(trust = trusted)]
+pub async fn vcs_svn_update(host: &Host, window: &str, repo: Option<PathBuf>, request: RequestId) -> IdeResult<String> {
+    host.require_trust(window)?;
+    let project = host.project(window)?;
+    let cancel = host.begin_project_request(window, request);
+    let result = blocking(move || {
+        let output = project.with_backend_at(repo.as_deref(), |backend| {
+            let svn = backend
+                .as_svn()
+                .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+            svn.update(&cancel)
+        });
+        project.with_disk_sync(|| output).map(|text| {
+            project.sink.emit(ide_core::IdeEvent::VcsChanged { root: project.root.clone().into() });
+            text
+        })
+    })
+    .await;
+    host.end_request(request);
+    result
+}
+
+/// Repairs a Subversion working copy's administrative state (`svn cleanup`).
+#[command(trust = trusted)]
+pub async fn vcs_svn_cleanup(host: &Host, window: &str, repo: Option<PathBuf>) -> IdeResult<()> {
+    host.require_trust(window)?;
+    let project = host.project(window)?;
+    blocking(move || {
+        project.with_backend_at(repo.as_deref(), |backend| {
+            let svn = backend
+                .as_svn()
+                .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+            svn.cleanup()
+        })
+    })
+    .await
+}
+
+/// A Subversion working copy's `svn info`, for the UI to display.
+#[derive(Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SvnInfo {
+    /// The working copy's base revision (`"123"`).
+    pub revision: String,
+    /// The URL the working-copy root was checked out from.
+    pub url: String,
+    /// The working-copy root.
+    pub root: String,
+}
+
+/// Information about the Subversion working copy at `repo` (the project's
+/// primary repository when `None`).
+#[command(trust = always)]
+pub async fn vcs_svn_info(host: &Host, window: &str, repo: Option<PathBuf>) -> IdeResult<SvnInfo> {
+    let project = host.project(window)?;
+    blocking(move || {
+        project.with_backend_at(repo.as_deref(), |backend| {
+            let svn = backend
+                .as_svn()
+                .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+            Ok(SvnInfo {
+                revision: svn.revision()?.to_string(),
+                url: svn.url()?,
+                root: svn.root().to_string_lossy().into_owned(),
+            })
+        })
+    })
+    .await
+}
+
 /// Added and deleted lines between two revisions (Git Log › lines added and deleted).
 /// `paths` limits the diff to those repository-relative paths; empty diffs every file.
 #[command(trust = always)]
@@ -2671,7 +2830,7 @@ pub async fn vcs_pending_patch(
     const MAX_PATCH: usize = 1 << 20;
     let project = host.project(window)?;
     blocking(move || {
-        project.with_repo_at(repo.as_deref(), |r| {
+        project.with_backend_at(repo.as_deref(), |r| {
             let changes = r.pending_changes(&options, MAX_PATCH, &|path| project.vcs_encoding(path, None))?;
             Ok(changes.into_iter().filter_map(|c| c.diff).collect())
         })
@@ -2735,7 +2894,9 @@ pub async fn vcs_patch_preview(
             Some(root) => repos.at_root(root),
             None => repos.primary(),
         }
-        .ok_or_else(|| ide_core::IdeError::unavailable("The patch repository is not in the project"))?;
+        .ok_or_else(|| ide_core::IdeError::unavailable("The patch repository is not in the project"))?
+        .as_git()
+        .ok_or_else(|| ide_core::IdeError::unavailable("The patch repository is not a Git repository"))?;
         let overrides = mappings.as_deref().unwrap_or(&[]);
         let (directory_matches, automatic_mappings) = discover_patch_directories(
             &repos,
@@ -3151,6 +3312,9 @@ pub async fn vcs_read_patch(host: &Host, window: &str, path: PathBuf) -> IdeResu
 ide_command::domain!(
     vcs_commands:
     vcs_add_to_ignore,
+    vcs_svn_cleanup,
+    vcs_svn_info,
+    vcs_svn_update,
     vcs_add_worktree,
     vcs_apply_patch,
     vcs_apply_project_patch,

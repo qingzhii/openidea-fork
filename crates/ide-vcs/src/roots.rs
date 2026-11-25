@@ -1,7 +1,9 @@
 //! The repositories of a project (IDEA's VCS roots): the one containing the project
 //! root plus those nested below it (separate clones side by side, submodules).
+//! Git and Subversion working copies live side by side here; every read goes
+//! through [`Backend`], the Changes-view surface (see #743).
 
-use crate::{Backend, FileStatus, Repo};
+use crate::{Backend, FileStatus, Repo, SvnWorkingCopy};
 use ide_core::{IdeError, IdeResult, IpcPath};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -18,7 +20,7 @@ const SKIPPED: &[&str] = &["node_modules", "target", "build", "dist", "out", "ve
 /// The repositories of a project, sorted by root; lookups pick the innermost one.
 #[derive(Clone, Default)]
 pub struct Repos {
-    repos: Vec<Arc<Repo>>,
+    repos: Vec<Arc<dyn Backend>>,
     primary: Option<usize>,
 }
 
@@ -30,13 +32,31 @@ pub struct ProjectUpdateTarget {
     pub detached_submodule: bool,
 }
 
+/// Discovers the backend owning `path`: Git first, then a Subversion working
+/// copy. `Ok(None)` when neither marker is found. A `.svn` directory with no
+/// svn client on the machine also degrades to `Ok(None)`: discovery must not
+/// block opening the project (the user may only have a GUI client installed),
+/// and the capability error resurfaces as `unavailable` when an SVN command
+/// actually runs.
+fn discover_any(path: &Path) -> IdeResult<Option<Arc<dyn Backend>>> {
+    if let Some(repo) = Repo::discover(path)? {
+        return Ok(Some(Arc::new(repo)));
+    }
+    let svn = match SvnWorkingCopy::discover(path) {
+        Ok(svn) => svn,
+        Err(e) if e.kind == ide_core::error::ErrorKind::Unavailable => None,
+        Err(e) => return Err(e),
+    };
+    Ok(svn.map(|svn| svn as Arc<dyn Backend>))
+}
+
 impl Repos {
     /// Discovers repositories in independent project folders of a workspace.
     pub fn discover_roots(roots: &[PathBuf], skip: &dyn Fn(&Path) -> bool) -> IdeResult<Self> {
-        let mut repos = Vec::new();
+        let mut repos: Vec<Arc<dyn Backend>> = Vec::new();
         for root in roots {
             for repo in Self::discover(root, skip)?.repos {
-                if !repos.iter().any(|r: &Arc<Repo>| r.root() == repo.root()) {
+                if !repos.iter().any(|r| r.root() == repo.root()) {
                     repos.push(repo);
                 }
             }
@@ -50,8 +70,8 @@ impl Repos {
     /// root lies below it (up to [`MAX_DEPTH`] levels; hidden and dependency folders and
     /// folders `skip` rejects are not searched).
     pub fn discover(project_root: &Path, skip: &dyn Fn(&Path) -> bool) -> IdeResult<Self> {
-        let mut repos: Vec<Repo> = Vec::new();
-        if let Some(r) = Repo::discover(project_root)? {
+        let mut repos: Vec<Arc<dyn Backend>> = Vec::new();
+        if let Some(r) = discover_any(project_root)? {
             repos.push(r);
         }
         let mut stack: Vec<(PathBuf, usize)> = vec![(project_root.to_path_buf(), 0)];
@@ -67,8 +87,9 @@ impl Repos {
                 if name.starts_with('.') || SKIPPED.contains(&name.as_ref()) || skip(&path) {
                     continue;
                 }
-                if path.join(".git").exists()
-                    && let Ok(Some(r)) = Repo::discover(&path)
+                let is_marker = path.join(".git").exists() || path.join(".svn").is_dir();
+                if is_marker
+                    && let Ok(Some(r)) = discover_any(&path)
                     && r.root() == path
                     && !repos.iter().any(|x| x.root() == r.root())
                 {
@@ -84,14 +105,17 @@ impl Repos {
         let mut next = 0;
         while next < repos.len() {
             let parent = &repos[next];
-            let children = parent.initialized_submodules().unwrap_or_else(|error| {
-                tracing::debug!(root = %parent.root().display(), %error, "cannot list Git submodules");
-                Vec::new()
-            });
+            let children = match parent.as_git() {
+                Some(git) => git.initialized_submodules().unwrap_or_else(|error| {
+                    tracing::debug!(root = %parent.root().display(), %error, "cannot list Git submodules");
+                    Vec::new()
+                }),
+                None => Vec::new(),
+            };
             for path in children {
                 if path.starts_with(project_root)
                     && !repos.iter().any(|r| r.root() == path)
-                    && let Ok(Some(repo)) = Repo::discover(&path)
+                    && let Ok(Some(repo)) = discover_any(&path)
                     && repo.root() == path
                 {
                     repos.push(repo);
@@ -104,7 +128,7 @@ impl Repos {
 
     /// Only the repository containing `project_root` (the quick lookup on project open).
     pub fn enclosing(project_root: &Path) -> IdeResult<Self> {
-        Ok(Self::new(Repo::discover(project_root)?.into_iter().collect(), project_root))
+        Ok(Self::new(discover_any(project_root)?.into_iter().collect(), project_root))
     }
 
     /// Directory Mappings applied: the repositories at `excluded` roots are dropped (their
@@ -112,15 +136,15 @@ impl Repos {
     /// repository of `project_root` if it remains.
     pub fn mapped(&self, excluded: &[PathBuf], added: &[PathBuf], project_root: &Path) -> Self {
         let same = |a: &Path, b: &Path| a == b || dunce::canonicalize(a).ok() == dunce::canonicalize(b).ok();
-        let mut repos: Vec<Arc<Repo>> =
+        let mut repos: Vec<Arc<dyn Backend>> =
             self.repos.iter().filter(|r| !excluded.iter().any(|e| same(e, r.root()))).cloned().collect();
         for root in added {
             if excluded.iter().any(|e| same(e, root)) || repos.iter().any(|r| same(r.root(), root)) {
                 continue;
             }
-            match Repo::discover(root) {
-                Ok(Some(r)) if same(r.root(), root) => repos.push(Arc::new(r)),
-                Ok(_) => tracing::debug!("mapped directory {} is not a git root", root.display()),
+            match discover_any(root) {
+                Ok(Some(r)) if same(r.root(), root) => repos.push(r),
+                Ok(_) => tracing::debug!("mapped directory {} is not a repository root", root.display()),
                 Err(e) => tracing::debug!("mapped directory {}: {}", root.display(), e.message),
             }
         }
@@ -135,9 +159,8 @@ impl Repos {
         self.repos.iter().map(|r| r.root().to_path_buf()).collect()
     }
 
-    fn new(mut repos: Vec<Repo>, project_root: &Path) -> Self {
+    fn new(mut repos: Vec<Arc<dyn Backend>>, project_root: &Path) -> Self {
         repos.sort_by(|a, b| a.root().cmp(b.root()));
-        let repos: Vec<Arc<Repo>> = repos.into_iter().map(Arc::new).collect();
         let roots: Vec<&Path> = repos.iter().map(|r| r.root()).collect();
         let primary = innermost(&roots, project_root, false).or((!repos.is_empty()).then_some(0));
         Self { repos, primary }
@@ -147,15 +170,17 @@ impl Repos {
         self.repos.is_empty()
     }
 
-    pub fn all(&self) -> &[Arc<Repo>] {
+    pub fn all(&self) -> &[Arc<dyn Backend>] {
         &self.repos
     }
 
     /// Selects the roots that Update Project operates on. Detached children are
     /// included with their selected superproject and read its updated pointer.
+    /// Subversion working copies join as plain targets — their update is a
+    /// working-copy operation with no superproject pointer to refresh.
     pub fn project_update_plan(&self, roots: &[Option<PathBuf>]) -> IdeResult<Vec<ProjectUpdateTarget>> {
-        let selected: BTreeSet<&Path> = if roots.is_empty() {
-            self.repos.iter().map(|repo| repo.root()).collect()
+        let selected: BTreeSet<PathBuf> = if roots.is_empty() {
+            self.repos.iter().map(|repo| repo.root().to_path_buf()).collect()
         } else {
             roots
                 .iter()
@@ -164,15 +189,17 @@ impl Repos {
                         Some(root) => self.at_root(root),
                         None => self.primary(),
                     }
-                    .map(|repo| repo.root())
+                    .map(|repo| repo.root().to_path_buf())
                     .ok_or_else(|| IdeError::unavailable("The selected repository is no longer part of the project"))
                 })
                 .collect::<IdeResult<_>>()?
         };
         let mut parents = BTreeMap::new();
-        for parent in &self.repos {
-            for path in parent.initialized_submodules().unwrap_or_default() {
-                parents.insert(path, parent.root());
+        for repo in &self.repos {
+            if let Some(git) = repo.as_git() {
+                for path in git.initialized_submodules().unwrap_or_default() {
+                    parents.insert(path, repo.root());
+                }
             }
         }
         let mut included = BTreeSet::new();
@@ -181,11 +208,18 @@ impl Repos {
             let root = repo.root();
             let parent = parents.get(root).copied();
             let is_selected = selected.contains(root);
-            if !is_selected && !parent.is_some_and(|p| included.contains(p)) {
+            // Only selected roots and their own detached children join the plan:
+            // another branch of the project's submodule tree must not ride along.
+            if !is_selected && !parent.is_some_and(|p| included.contains(&p)) {
                 continue;
             }
-            let (branch, head) = repo.head()?;
-            let detached_submodule = branch.is_none() && head.is_some() && parent.is_some();
+            let detached_submodule = match repo.as_git() {
+                Some(git) => {
+                    let (branch, head) = git.head()?;
+                    branch.is_none() && head.is_some() && parent.is_some()
+                }
+                None => false,
+            };
             if is_selected || detached_submodule {
                 included.insert(root);
                 targets.push(ProjectUpdateTarget {
@@ -199,14 +233,14 @@ impl Repos {
     }
 
     /// The repository of the project root, else the first one.
-    pub fn primary(&self) -> Option<&Arc<Repo>> {
+    pub fn primary(&self) -> Option<&Arc<dyn Backend>> {
         self.primary.map(|i| &self.repos[i])
     }
 
     /// The innermost repository containing `path` (a file or folder). A nested repository's
     /// root is an entry of the enclosing repository (a submodule or untracked folder there), so
     /// it belongs to that one; to the repository itself only when nothing encloses it.
-    pub fn for_path(&self, path: &Path) -> Option<&Arc<Repo>> {
+    pub fn for_path(&self, path: &Path) -> Option<&Arc<dyn Backend>> {
         let roots: Vec<&Path> = self.repos.iter().map(|r| r.root()).collect();
         let found = innermost(&roots, path, true).or_else(|| {
             // Another spelling of the same location (symlinks, /var vs /private/var).
@@ -220,7 +254,7 @@ impl Repos {
 
     /// The repository whose worktree root is `root` (the repository a repository-scoped
     /// command was given).
-    pub fn at_root(&self, root: &Path) -> Option<&Arc<Repo>> {
+    pub fn at_root(&self, root: &Path) -> Option<&Arc<dyn Backend>> {
         self.repos.iter().find(|r| r.root() == root).or_else(|| {
             let canon = dunce::canonicalize(root).ok()?;
             self.repos.iter().find(|r| dunce::canonicalize(r.root()).is_ok_and(|r| r == canon))
@@ -228,8 +262,8 @@ impl Repos {
     }
 
     /// `paths` grouped by the repository each belongs to (paths outside every repository are dropped).
-    pub fn group(&self, paths: &[PathBuf]) -> Vec<(Arc<Repo>, Vec<PathBuf>)> {
-        let mut out: Vec<(Arc<Repo>, Vec<PathBuf>)> = Vec::new();
+    pub fn group(&self, paths: &[PathBuf]) -> Vec<(Arc<dyn Backend>, Vec<PathBuf>)> {
+        let mut out: Vec<(Arc<dyn Backend>, Vec<PathBuf>)> = Vec::new();
         for p in paths {
             let Some(repo) = self.for_path(p) else { continue };
             match out.iter_mut().find(|(r, _)| Arc::ptr_eq(r, repo)) {
@@ -243,19 +277,20 @@ impl Repos {
     /// Changes of every repository. A nested repository reports its own files, so the
     /// enclosing one's "untracked folder" entry for it, and its entries inside it, are dropped. A repository that cannot
     /// be read (e.g. deleted since the last scan) is left out; fails only when all fail.
-    ///
-    /// The reads go through [`Backend`], the Changes-view surface — repositories of a
-    /// future second backend slot in here once `Repos` learns to hold them.
     pub fn status(&self) -> IdeResult<Vec<FileStatus>> {
-        self.read_status(self.all_status_groups(), |repo, _| (repo as &dyn Backend).status())
+        self.read_status(self.all_status_groups(), |repo, _| repo.status())
     }
 
     /// Ignored entries for the staging tree. Commit and status consumers read the regular status.
+    /// Git-only for now: a Git repository reports its ignored files, other backends none.
     pub fn ignored_files(&self) -> IdeResult<Vec<FileStatus>> {
-        self.read_status(self.all_status_groups(), |repo, _| repo.ignored_files())
+        self.read_status(self.all_status_groups(), |repo, _| match repo.as_git() {
+            Some(git) => git.ignored_files(),
+            None => Ok(Vec::new()),
+        })
     }
 
-    fn all_status_groups(&self) -> Vec<(Arc<Repo>, Vec<PathBuf>)> {
+    fn all_status_groups(&self) -> Vec<(Arc<dyn Backend>, Vec<PathBuf>)> {
         self.repos.iter().map(|repo| (repo.clone(), Vec::new())).collect()
     }
 
@@ -263,15 +298,15 @@ impl Repos {
     /// so a repository without one is not read at all and a nested repository keeps its own
     /// files (the enclosing one's "untracked folder" entry for them is dropped).
     pub fn status_paths(&self, paths: &[PathBuf]) -> IdeResult<Vec<FileStatus>> {
-        self.read_status(self.group(paths), |repo, mine| (repo as &dyn Backend).status_paths(mine))
+        self.read_status(self.group(paths), |repo, mine| repo.status_paths(mine))
     }
 
     /// A nested repository reports its own files. When a repository cannot be read,
     /// the operation can still display the other repositories' results.
     fn read_status(
         &self,
-        groups: Vec<(Arc<Repo>, Vec<PathBuf>)>,
-        status: impl Fn(&Repo, &[PathBuf]) -> IdeResult<Vec<FileStatus>>,
+        groups: Vec<(Arc<dyn Backend>, Vec<PathBuf>)>,
+        status: impl Fn(&Arc<dyn Backend>, &[PathBuf]) -> IdeResult<Vec<FileStatus>>,
     ) -> IdeResult<Vec<FileStatus>> {
         let mut out = Vec::new();
         let mut first_error = None;
@@ -289,7 +324,7 @@ impl Repos {
                     status
                 }
                 Err(e) => {
-                    tracing::warn!("git status of {}: {e}", repo.root().display());
+                    tracing::warn!("status of {}: {e}", repo.root().display());
                     first_error.get_or_insert(e);
                     continue;
                 }
@@ -527,5 +562,52 @@ mod tests {
         assert_eq!(repos.all().len(), 2);
         assert_eq!(repos.primary().unwrap().root(), root.join("a"), "the first when none contains the project root");
         assert!(repos.for_path(&root.join("c.txt")).is_none());
+    }
+
+    /// A Subversion working copy joined by a nested Git repository: both are
+    /// discovered, and each file routes to its own backend.
+    #[test]
+    fn svn_root_with_nested_git_repository() {
+        let Ok(_) = Command::new("svn").arg("--version").arg("--quiet").output() else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let repo = base.join("repo");
+        let wc = base.join("project");
+        run_svn(&base, &["svnadmin", "create", &repo.to_string_lossy()]);
+        run_svn(&base, &["svn", "checkout", "-q", &file_url(&repo), &wc.to_string_lossy()]);
+        std::fs::write(wc.join("a.txt"), "hello\n").unwrap();
+        run_svn(&wc, &["svn", "add", "-q", "a.txt"]);
+        run_svn(&wc, &["svn", "commit", "-q", "-m", "init"]);
+        let nested = wc.join("lib");
+        std::fs::create_dir(&nested).unwrap();
+        git_init(&nested);
+
+        let repos = Repos::discover(&wc, &|_| false).unwrap();
+        assert_eq!(repos.all().len(), 2);
+        assert_eq!(repos.primary().unwrap().root(), wc);
+        assert!(repos.for_path(&wc.join("a.txt")).unwrap().as_git().is_none(), "a.txt belongs to the svn working copy");
+        assert!(repos.for_path(&nested.join("x.rs")).unwrap().as_git().is_some(), "nested files route to git");
+        let status = repos.status().unwrap();
+        assert!(status.iter().any(|f| f.rel_path == "a.txt"), "{status:?}");
+    }
+
+    fn run_svn(dir: &Path, args: &[&str]) {
+        let program = args[0];
+        let ok = Command::new(program).args(&args[1..]).current_dir(dir).status().is_ok_and(|s| s.success());
+        assert!(ok, "{args:?} in {}", dir.display());
+    }
+
+    fn file_url(path: &Path) -> String {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let mut url = String::from("file:///");
+        for byte in text.trim_start_matches('/').as_bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                    url.push(*byte as char)
+                }
+                other => url.push_str(&format!("%{other:02X}")),
+            }
+        }
+        url
     }
 }

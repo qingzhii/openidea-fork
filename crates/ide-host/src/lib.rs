@@ -235,6 +235,7 @@ impl Host {
         host.apply_proxy();
         host.apply_added_jdks();
         host.apply_git_executable();
+        host.apply_svn_executable();
         // Before any project starts jdtls; the deleting itself can take a while.
         let unused =
             ide_sdk::jdtls_workspaces::take_unused(&host.local_data_dir, ide_sdk::jdtls_workspaces::UNUSED_FOR);
@@ -662,6 +663,13 @@ impl Host {
     pub fn apply_git_executable(&self) {
         let exe = self.global_settings.read_effective(|s| s.vcs.git.executable.trim().to_owned());
         ide_vcs::set_default_git_executable((!exe.is_empty()).then(|| Path::new(&exe)));
+    }
+
+    /// Global Settings › Version Control › Subversion › Path to SVN executable. A project's
+    /// own value overwrites it while that project is open ([`Project::repos`]).
+    pub fn apply_svn_executable(&self) {
+        let exe = self.global_settings.read_effective(|s| s.vcs.svn.executable.clone().unwrap_or_default());
+        ide_vcs::set_default_svn_executable((!exe.trim().is_empty()).then(|| Path::new(exe.trim())));
     }
 }
 

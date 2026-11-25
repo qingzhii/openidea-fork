@@ -746,7 +746,7 @@ enum Change {
     Removed,
     /// Created and removed again within the batch.
     Transient,
-    /// VCS metadata (`.git/HEAD`, …): always reported as modified.
+    /// VCS metadata (`.git/HEAD`, `.svn/wc.db`, …): always reported as modified.
     Vcs,
 }
 
@@ -846,6 +846,12 @@ impl EventFilter {
                 _ => false,
             };
         }
+        if let Some(i) = comps.iter().position(|c| c.as_os_str() == ".svn") {
+            // Only the administrative area's top level is watched: wc.db and its
+            // journal carry every working-copy change, while the pristine store
+            // below is large and its writes ride along with the database's.
+            return i + 1 == comps.len();
+        }
         if parent_ok { !self.excludes.read().is_match(rel) } else { !self.excludes.read().is_excluded(rel) }
     }
 
@@ -854,6 +860,7 @@ impl EventFilter {
     fn report_discovered(&self, path: &Path, is_dir: bool, found: &mut FsBatch) {
         let Ok(rel) = path.strip_prefix(&self.root) else { return };
         if Self::git_internal(rel).is_some()
+            || Self::svn_internal(rel)
             || self.excludes.read().is_excluded(rel)
             || crate::encoding::is_atomic_temp(path)
         {
@@ -866,20 +873,36 @@ impl EventFilter {
         }
     }
 
+    /// Whether `rel` lives inside a Subversion administrative area: everything
+    /// under `.svn` is VCS metadata (the wc.db database, the pristine store),
+    /// reported like `.git`'s own instead of as project files.
+    fn svn_internal(rel: &Path) -> bool {
+        rel.components().any(|c| c.as_os_str() == ".svn")
+    }
+
     fn classify(&self, path: &Path, change: Change, out: &mut BTreeMap<PathBuf, Change>) {
         let rel = match path.strip_prefix(&self.root) {
             Ok(rel) if rel.as_os_str().is_empty() => return,
             Ok(rel) => Some(rel),
             Err(_) => None,
         };
-        let change = match rel.and_then(Self::git_internal) {
-            // Windows also reports a directory modification when Git creates or removes a lock.
-            // The entries carry the actual changes, including edits to a linked worktree's gitfile.
-            Some(true) if change == Change::Modified && path.is_dir() => return,
-            Some(true) => Change::Vcs,
-            Some(false) => return,
-            None if crate::encoding::is_atomic_temp(path) => return,
-            None => change,
+        let change = if rel.is_some_and(Self::svn_internal) {
+            // Windows also reports a directory modification when sqlite touches
+            // `.svn`; the wc.db write itself carries the change.
+            if change == Change::Modified && path.is_dir() {
+                return;
+            }
+            Change::Vcs
+        } else {
+            match rel.and_then(Self::git_internal) {
+                // Windows also reports a directory modification when Git creates or removes a lock.
+                // The entries carry the actual changes, including edits to a linked worktree's gitfile.
+                Some(true) if change == Change::Modified && path.is_dir() => return,
+                Some(true) => Change::Vcs,
+                Some(false) => return,
+                None if crate::encoding::is_atomic_temp(path) => return,
+                None => change,
+            }
         };
         let entry = out.get(path).copied();
         out.insert(path.to_path_buf(), merge(entry, change));

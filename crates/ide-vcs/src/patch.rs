@@ -568,7 +568,7 @@ impl ProjectPatch {
                 return None;
             }
             let full = base.join(path);
-            let repo = repos.for_path(&full)?;
+            let repo = repos.for_path(&full)?.as_git()?;
             let relative_root = repo.root().strip_prefix(base).ok()?;
             (full != repo.root()).then_some((repo.root(), relative_root))
         };

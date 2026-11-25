@@ -18,6 +18,7 @@ pub struct VcsSettings {
     pub limit_history: bool,
     pub history_limit: u32,
     pub git: GitSettings,
+    pub svn: SvnSettings,
     pub commit: CommitSettings,
     pub confirmation: VcsConfirmationSettings,
     pub shelf: ShelfSettings,
@@ -63,6 +64,7 @@ impl Default for VcsSettings {
             limit_history: true,
             history_limit: 1000,
             git: GitSettings::default(),
+            svn: SvnSettings::default(),
             commit: CommitSettings::default(),
             confirmation: VcsConfirmationSettings::default(),
             shelf: ShelfSettings::default(),
@@ -219,6 +221,14 @@ impl Default for GitSettings {
             cli_status: false,
         }
     }
+}
+
+/// Version Control › Subversion.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SvnSettings {
+    /// Path to the svn executable; unset = auto-detect.
+    pub executable: Option<String>,
 }
 
 /// Version Control › Commit: commit checks and commit-message inspections.
