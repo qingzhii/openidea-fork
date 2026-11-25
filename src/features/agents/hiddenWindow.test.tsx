@@ -230,7 +230,8 @@ describe("a kept-alive session tab that stays hidden", () => {
     expect(stream().scrollTop).toBe(stream().scrollHeight);
   });
 
-  it("lets Find in Conversation search the whole history once shown again", async () => {
+  // The find itself waits up to 10s inside (findByText timeout), so the test needs more than the default.
+  it("lets Find in Conversation search the whole history once shown again", { timeout: 30_000 }, async () => {
     const view = render(session(true));
     await settle("Reply 59");
     layOut(stream());

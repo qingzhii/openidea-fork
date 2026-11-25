@@ -150,7 +150,8 @@ export function inspectRustArtifacts(
     seen.add(id);
     for (const file of [bench, estimates]) {
       const modified = statSync(file).mtimeMs;
-      artifacts.push({ path: relative(dir, file), modifiedAt: new Date(modified).toISOString() });
+      // Report paths with `/` on every platform: they are report JSON fields, not filesystem handles.
+      artifacts.push({ path: relative(dir, file).replaceAll("\\", "/"), modifiedAt: new Date(modified).toISOString() });
       // Allow filesystem timestamp rounding, not future-dated benchmark results.
       if (modified > now + 1000) throw new Error(`future Criterion artifact: ${file}`);
       if (started !== undefined && modified < started) throw new Error(`stale Criterion artifact: ${file}`);

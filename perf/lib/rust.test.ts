@@ -81,7 +81,8 @@ describe("Rust workload contract", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("resolves target and Criterion overrides relative to cargo's cwd", () => {
+  // path.resolve spells absolute paths with the Windows drive; the POSIX shapes below only hold there.
+  it.skipIf(process.platform === "win32")("resolves target and Criterion overrides relative to cargo's cwd", () => {
     expect(rustPaths("/work", {})).toEqual({ target: "/work/target", criterion: "/work/target/criterion" });
     expect(rustPaths("/work", { CARGO_TARGET_DIR: "private" })).toEqual({
       target: "/work/private",

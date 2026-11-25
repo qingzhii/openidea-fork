@@ -41,7 +41,8 @@ describe("theme token reference", () => {
   });
 
   it("is current in plugins/themes.md (run pnpm gen:theme-docs)", () => {
-    const doc = read("plugins/themes.md");
+    // A CRLF checkout differs from the generated text in line endings only; compare the content.
+    const doc = read("plugins/themes.md").replaceAll("\r\n", "\n");
     expect(withReference(doc, referenceMarkdown(groups))).toBe(doc);
   });
 });

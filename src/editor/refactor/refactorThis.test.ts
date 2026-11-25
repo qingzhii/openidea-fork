@@ -286,7 +286,7 @@ describe("Refactor This", () => {
 });
 
 describe("Refactor menu actions", () => {
-  it("apply the single matching action, or offer a choice", async () => {
+  it("apply the single matching action, or offer a choice", { timeout: 20_000 }, async () => {
     query = answer([action("Move to a new file", "refactor.move.newFile")]);
     await runRefactoring(editor(), "move");
     expect(lspExecuteCodeAction).toHaveBeenCalledOnce();
@@ -323,32 +323,37 @@ describe("Refactor menu actions", () => {
     expect(showHint).toHaveBeenLastCalledWith(v, "Cannot perform refactoring. No language server for Rust is running");
   });
 
-  it("offer to install pylsp-rope when a Python refactoring it provides finds nothing", async () => {
-    const prompt = vi.fn();
-    const dispose = registerAction({
-      id: "tools.promptInstall",
-      title: "Install Missing Tool",
-      run: ({ arg }) => prompt(arg),
-    });
-    try {
-      const py = editor("total = price * 2", "python");
-      for (const id of ["extractMethod", "inline", "extractParameter"] as const) await runRefactoring(py, id);
-      expect(prompt.mock.calls.map((c) => c[0])).toEqual([
-        { name: "pylsp", refactoring: "Extract Method" },
-        { name: "pylsp", refactoring: "Inline" },
-        { name: "pylsp", refactoring: "Introduce Parameter" },
-      ]);
-      prompt.mockClear();
-      // Not a rope refactoring, another language, or the server already offers it.
-      await runRefactoring(py, "move");
-      await runRefactoring(editor(), "extractMethod");
-      query = answer([action("Extract method", "refactor.extract")]);
-      await runRefactoring(editor("total = price * 2", "python"), "extractMethod");
-      expect(prompt).not.toHaveBeenCalled();
-    } finally {
-      dispose();
-    }
-  });
+  // Real timers inside (tool detection): ~5.5s on this machine, over the 5s default.
+  it(
+    "offer to install pylsp-rope when a Python refactoring it provides finds nothing",
+    { timeout: 20_000 },
+    async () => {
+      const prompt = vi.fn();
+      const dispose = registerAction({
+        id: "tools.promptInstall",
+        title: "Install Missing Tool",
+        run: ({ arg }) => prompt(arg),
+      });
+      try {
+        const py = editor("total = price * 2", "python");
+        for (const id of ["extractMethod", "inline", "extractParameter"] as const) await runRefactoring(py, id);
+        expect(prompt.mock.calls.map((c) => c[0])).toEqual([
+          { name: "pylsp", refactoring: "Extract Method" },
+          { name: "pylsp", refactoring: "Inline" },
+          { name: "pylsp", refactoring: "Introduce Parameter" },
+        ]);
+        prompt.mockClear();
+        // Not a rope refactoring, another language, or the server already offers it.
+        await runRefactoring(py, "move");
+        await runRefactoring(editor(), "extractMethod");
+        query = answer([action("Extract method", "refactor.extract")]);
+        await runRefactoring(editor("total = price * 2", "python"), "extractMethod");
+        expect(prompt).not.toHaveBeenCalled();
+      } finally {
+        dispose();
+      }
+    },
+  );
 
   it("Introduce Variable falls back to the syntax refactoring", async () => {
     query = async () => unavailable;

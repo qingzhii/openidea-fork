@@ -38,6 +38,7 @@ beforeAll(async () => {
   browser = await chromium.launch({ channel: process.env.OPENIDEA_PERF_CHANNEL ?? "chromium" });
 }, 30_000);
 
+// The first context pays the dev server's cold start; closing under load is not instant either.
 beforeEach(async () => {
   context = await browser.newContext();
   page = await context.newPage();
@@ -46,10 +47,10 @@ beforeEach(async () => {
   await page.evaluate(installInPage);
   const cdp = await context.newCDPSession(page);
   h = new Harness(page, cdp);
-});
+}, 30_000);
 afterEach(async () => {
   await context?.close();
-});
+}, 30_000);
 afterAll(async () => {
   await browser?.close();
   await server?.close();

@@ -440,7 +440,11 @@ describe("markdown preview re-rendering", () => {
   });
 
   it("renders a large document as a whole, sanitizing only what an edit changed", { timeout: 20_000 }, () => {
-    const asWritten = readFileSync(resolve(import.meta.dirname, "../../../../plugins/README.md"), "utf8");
+    // Paragraph boundaries below are located with "\n\n": a CRLF checkout reads as the same document.
+    const asWritten = readFileSync(resolve(import.meta.dirname, "../../../../plugins/README.md"), "utf8").replaceAll(
+      "\r\n",
+      "\n",
+    );
     // As written, a bare `<title>` swallows the rest of the file, so it is rendered as a whole.
     for (const [readme, reuses] of [
       [asWritten.replace('"<title> failed', '"`<title>` failed'), true],

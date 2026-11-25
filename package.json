@@ -10,7 +10,7 @@
     "build": "node --max-old-space-size=4096 node_modules/typescript/bin/tsc --noEmit && vite build && node scripts/check-webkit.ts",
     "preview": "vite preview",
     "tauri": "node scripts/tauri.ts",
-    "test": "vitest run",
+    "test": "vitest run --exclude perf/lib/causality.test.ts --exclude perf/lib/lifecycle.test.ts && vitest run perf/lib/causality.test.ts perf/lib/lifecycle.test.ts",
     "test:watch": "vitest",
     "smoke": "vitest run --config smoke/vitest.config.ts",
     "lint": "oxlint",

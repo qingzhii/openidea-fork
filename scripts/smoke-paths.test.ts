@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -19,7 +20,10 @@ import {
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-describe("the Language smoke workflow", () => {
+// The Changes step models GitHub Actions' runner: its `classify.sh` needs bash and `emit()` jq.
+const CHANGES_STEP_TOOLS = ["bash", "jq"].every((tool) => spawnSync(tool, ["--version"]).status === 0);
+
+describe.skipIf(!CHANGES_STEP_TOOLS)("the Language smoke workflow", () => {
   const workflow = readWorkflow(repo);
 
   it("runs every language when a file the frontend smoke loads changes", async () => {
@@ -136,7 +140,7 @@ describe("GitHub path filters", () => {
   });
 });
 
-describe("the Changes step", () => {
+describe.skipIf(!CHANGES_STEP_TOOLS)("the Changes step", () => {
   // The shape of language-smoke.yml's step, with a POSIX class JavaScript reads differently.
   const step = (arms: string) => `
     set -euo pipefail

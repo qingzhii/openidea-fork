@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { ensureSyntaxTree } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { EditorState, StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -62,7 +63,14 @@ describe("types", () => {
 const python = await languages.find((language) => language.name === "Python")!.load();
 
 describe("expected type", () => {
-  const expected = (doc: string) => expectedFromText(EditorState.create({ doc, extensions: python }), doc.length);
+  // expectedFromText's 10ms parse timeout races with CPU scheduling: on a loaded machine the
+  // tree is still partial and no enclosing function is found. Finish the parse first, so the
+  // assertions see the full tree regardless of machine load.
+  const expected = (doc: string) => {
+    const state = EditorState.create({ doc, extensions: python });
+    ensureSyntaxTree(state, doc.length, 1_000);
+    return expectedFromText(state, doc.length);
+  };
 
   it("reads the active parameter's annotation", () => {
     const label = "(p: Priority, d: date = ...) -> Task";
