@@ -17,9 +17,17 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
-    baseURL: `http://localhost:${PORT}`,
+    // 127.0.0.1, not `localhost`: Node binds the first address it resolves the
+    // host to — on Windows often only `[::1]` — while clients prefer `127.0.0.1`,
+    // so half the connections to a `localhost` server are refused (the specs then
+    // die at `goto` with ERR_CONNECTION_REFUSED or fail loading `main.tsx`).
+    baseURL: `http://127.0.0.1:${PORT}`,
     viewport: { width: 1400, height: 900 },
-    trace: "retain-on-failure",
+    // On this Windows machine the retained trace files vanish before context
+    // close (the sandboxed runner loses .playwright-artifacts-* trace/network
+    // files), failing whole specs with a close-time ENOENT and dragging page
+    // loads down under load. Linux CI keeps traces for debugging.
+    trace: process.platform === "win32" ? "off" : "retain-on-failure",
     // The workbench keeps indeterminate progress animations running; screenshots
     // are taken explicitly with `animations: "disabled"` instead.
     screenshot: "off",
@@ -37,8 +45,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `pnpm exec vite --port ${PORT} --strictPort`,
-    url: `http://localhost:${PORT}`,
+    command: `pnpm exec vite --host 127.0.0.1 --port ${PORT} --strictPort`,
+    url: `http://127.0.0.1:${PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     stdout: "ignore",
