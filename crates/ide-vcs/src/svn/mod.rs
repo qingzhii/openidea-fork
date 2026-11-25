@@ -425,9 +425,9 @@ impl SvnWorkingCopy {
         let list =
             |sub: &str| -> IdeResult<Vec<SvnBranch>> { self.ls_dirs(&format!("{}/{sub}", info.repo_root), cancel) };
         let mut branches = list("branches")?;
-        branches.sort_unstable_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        branches.sort_unstable_by_key(|b| b.name.to_lowercase());
         let mut tags = list("tags")?;
-        tags.sort_unstable_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        tags.sort_unstable_by_key(|b| b.name.to_lowercase());
         let mut all = list("trunk")?;
         all.append(&mut branches);
         Ok(SvnBranches { branches: all, tags })
@@ -487,8 +487,11 @@ impl SvnWorkingCopy {
         switch_after: bool,
         cancel: &CancellationToken,
     ) -> IdeResult<String> {
-        if name.trim().is_empty() {
-            return Err(IdeError::invalid("branch name is empty"));
+        if name.trim().is_empty() || name.contains('/') || name.contains('\\') {
+            // A `/` would become a nested path server-side (`a/b` creates
+            // `/branches/a/b`), not a branch named `a/b` — same rule the
+            // frontend's branch dialog enforces.
+            return Err(IdeError::invalid("branch name is empty or contains path separators"));
         }
         let info = self.info()?;
         let target = format!("{}/branches/{}", info.repo_root, encode_url_component(name));
@@ -509,8 +512,11 @@ impl SvnWorkingCopy {
     /// is unreachable through this method (it always resolves below
     /// `/branches`, never to `/trunk`).
     pub fn delete_branch(&self, name: &str, message: &str, cancel: &CancellationToken) -> IdeResult<String> {
-        if name.trim().is_empty() {
-            return Err(IdeError::invalid("branch name is empty"));
+        if name.trim().is_empty() || name.contains('/') || name.contains('\\') {
+            // A `/` would become a nested path server-side (`a/b` creates
+            // `/branches/a/b`), not a branch named `a/b` — same rule the
+            // frontend's branch dialog enforces.
+            return Err(IdeError::invalid("branch name is empty or contains path separators"));
         }
         let info = self.info()?;
         let target = format!("{}/branches/{}", info.repo_root, encode_url_component(name));
