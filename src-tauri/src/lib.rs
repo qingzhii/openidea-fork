@@ -165,9 +165,10 @@ pub fn run() {
     let window_state = window_state.with_filter(windows::keeps_window_state);
     #[cfg(not(target_os = "linux"))]
     let app = app.plugin(window_state.build());
-    let app = app
-        // Inert until an endpoint is configured (see `commands::window::app_check_update`).
-        .plugin(tauri_plugin_updater::Builder::new().build());
+    // Fork builds ship without the auto-updater: its endpoint pointed at
+    // upstream's release feed, so an update would replace fork builds
+    // (SVN support included) with upstream artifacts. `check_update`
+    // stays disabled without the plugin and the frontend hides the UI.
     // Files of plugins' web views, for their sandboxed frames.
     let app = app.register_asynchronous_uri_scheme_protocol(plugin_web::SCHEME, plugin_web::handle);
     // E2E automation bridge (Tauri MCP), debug builds only, localhost only.
