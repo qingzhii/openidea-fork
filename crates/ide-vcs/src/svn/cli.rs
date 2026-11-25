@@ -206,6 +206,90 @@ pub(crate) fn run_cancellable_stdin(
     finish_cancellable(child, cancel)
 }
 
+/// [`run_cancellable`] that streams every stdout/stderr line to `on_output`
+/// as it arrives, for the long-running commands the VCS console shows
+/// (`checkout`). Fails on a non-zero exit, with the last `svn:` lines as the
+/// message — mirroring [`crate::cli::run_streaming`]'s contract.
+pub(crate) fn run_streaming(
+    root: &Path,
+    args: &[&str],
+    cancel: &CancellationToken,
+    on_output: &dyn Fn(String),
+) -> IdeResult<()> {
+    if cancel.is_cancelled() {
+        return Err(IdeError::cancelled());
+    }
+    let mut cmd = command(root)?;
+    cmd.args(args.iter());
+    tracing::debug!(?args, "svn (streaming)");
+    let mut child = cmd.spawn().map_err(|e| spawn_error(root, e))?;
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut readers = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        let pipe_tx = tx.clone();
+        readers.push(std::thread::spawn(move || read_lines(out, pipe_tx)));
+    }
+    if let Some(err) = child.stderr.take() {
+        let pipe_tx = tx.clone();
+        readers.push(std::thread::spawn(move || read_lines(err, pipe_tx)));
+    }
+    drop(tx);
+
+    // The tail of the `svn:` lines: warnings and errors are the failure message.
+    let mut stderr_tail: Vec<String> = Vec::new();
+    loop {
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            for reader in readers {
+                let _ = reader.join();
+            }
+            return Err(IdeError::cancelled());
+        }
+        match rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(line) => {
+                if line.starts_with("svn: ") {
+                    if stderr_tail.len() > 40 {
+                        stderr_tail.remove(0);
+                    }
+                    stderr_tail.push(line.clone());
+                }
+                on_output(line);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let status = child.wait()?;
+    if status.success() {
+        return Ok(());
+    }
+    let out = Output { stdout: Vec::new(), stderr: stderr_tail.join("\n").into_bytes(), code: status.code() };
+    Err(failure(args, &out))
+}
+
+/// Forwards every line of `pipe` as it arrives; the pipe closing ends the
+/// stream.
+fn read_lines<R: std::io::Read>(pipe: R, tx: std::sync::mpsc::Sender<String>) {
+    let mut reader = std::io::BufReader::new(pipe);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match std::io::BufRead::read_until(&mut reader, b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_owned();
+                if !line.is_empty() {
+                    let _ = tx.send(line);
+                }
+            }
+        }
+    }
+}
+
 /// Drains stdout/stderr on threads (a full pipe would otherwise deadlock a
 /// `try_wait` poll loop on large `svn log`/`svn diff` output) and collects the
 /// result after the child exits.

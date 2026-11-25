@@ -8948,7 +8948,7 @@
   "No such file or folder": "檔案或資料夾不存在",
   "Choose a folder": "請選擇資料夾",
   "Nothing to annotate": "沒有可註解的內容",
-  "The file has no committed history in Git.": "此檔案在 Git 中沒有已提交的歷史。",
+  "The file has no committed history.": "此檔案沒有已提交的歷史。",
   "Only one runs at a time": "同一時間只執行一個",
   "Use only {displayName}": "只使用 {displayName}",
   "First available: {order}": "按順序使用第一個可用的：{order}",

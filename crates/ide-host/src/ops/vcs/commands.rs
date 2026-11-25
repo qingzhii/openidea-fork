@@ -2738,6 +2738,209 @@ pub async fn vcs_svn_info(host: &Host, window: &str, repo: Option<PathBuf>) -> I
     .await
 }
 
+/// The Subversion repository's conventional layout (`/trunk`, `/branches/*`,
+/// `/tags/*`) for the branch/tag switcher. Cancellable — it talks to the
+/// repository.
+#[command(trust = always)]
+pub async fn vcs_svn_branches(
+    host: &Host,
+    window: &str,
+    repo: Option<PathBuf>,
+    request: RequestId,
+) -> IdeResult<SvnBranches> {
+    let project = host.project(window)?;
+    let cancel = host.begin_project_request(window, request);
+    let result = blocking(move || {
+        project.with_backend_at(repo.as_deref(), |backend| {
+            let svn = backend
+                .as_svn()
+                .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+            svn.branches(&cancel)
+        })
+    })
+    .await;
+    host.end_request(request);
+    result
+}
+
+/// Switches the working copy at `repo` to `branch_url` (`svn switch`); the
+/// output goes back for the VCS console. Cancellable.
+#[command(trust = trusted)]
+pub async fn vcs_svn_switch(
+    host: &Host,
+    window: &str,
+    repo: Option<PathBuf>,
+    request: RequestId,
+    branch_url: String,
+    on_output: Channel<String>,
+) -> IdeResult<()> {
+    host.require_trust(window)?;
+    let project = host.project(window)?;
+    let cancel = host.begin_project_request(window, request);
+    let result = blocking(move || {
+        let output = project.with_disk_sync(|| {
+            project.with_backend_at(repo.as_deref(), |backend| {
+                let svn = backend
+                    .as_svn()
+                    .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+                svn.switch_to(&branch_url, &cancel)
+            })
+        });
+        output.map(|text| {
+            for line in text.lines().filter(|line| !line.is_empty()) {
+                let _ = on_output.send(line.to_owned());
+            }
+            project.sink.emit(ide_core::IdeEvent::VcsChanged { root: project.root.clone().into() });
+        })
+    })
+    .await;
+    host.end_request(request);
+    result
+}
+
+/// Copies the working copy's current location to `/branches/<name>` (a
+/// repository-side `svn copy` that commits `message` immediately), optionally
+/// switching the working copy to the new branch. Cancellable.
+#[command(trust = trusted)]
+pub async fn vcs_svn_copy_branch(
+    host: &Host,
+    window: &str,
+    repo: Option<PathBuf>,
+    request: RequestId,
+    name: String,
+    message: String,
+    switch_after: bool,
+    on_output: Channel<String>,
+) -> IdeResult<()> {
+    host.require_trust(window)?;
+    let project = host.project(window)?;
+    let cancel = host.begin_project_request(window, request);
+    let result = blocking(move || {
+        // `switch_after` moves working-tree files; the sync is a no-op otherwise.
+        let output = project.with_disk_sync(|| {
+            project.with_backend_at(repo.as_deref(), |backend| {
+                let svn = backend
+                    .as_svn()
+                    .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+                svn.copy_branch(&name, &message, switch_after, &cancel)
+            })
+        });
+        output.map(|url| {
+            let _ = on_output.send(format!("Committed {url}"));
+            project.sink.emit(ide_core::IdeEvent::VcsChanged { root: project.root.clone().into() });
+        })
+    })
+    .await;
+    host.end_request(request);
+    result
+}
+
+/// Deletes `/branches/<name>` in the repository (refused for the branch the
+/// working copy is on). Cancellable.
+#[command(trust = trusted)]
+pub async fn vcs_svn_delete_branch(
+    host: &Host,
+    window: &str,
+    repo: Option<PathBuf>,
+    request: RequestId,
+    name: String,
+    message: String,
+    on_output: Channel<String>,
+) -> IdeResult<()> {
+    host.require_trust(window)?;
+    let project = host.project(window)?;
+    let cancel = host.begin_project_request(window, request);
+    let result = blocking(move || {
+        let output = project.with_backend_at(repo.as_deref(), |backend| {
+            let svn = backend
+                .as_svn()
+                .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+            svn.delete_branch(&name, &message, &cancel)
+        });
+        output.map(|url| {
+            let _ = on_output.send(format!("Deleted {url}"));
+            project.sink.emit(ide_core::IdeEvent::VcsChanged { root: project.root.clone().into() });
+        })
+    })
+    .await;
+    host.end_request(request);
+    result
+}
+
+/// Resolves `paths`' conflicts by accepting `accept`'s side (`svn resolve
+/// --accept`): the hand-edited working text, the pre-update content (`mine`)
+/// or the incoming revision (`theirs`). Grouped by repository like the Git
+/// conflict commands, with the Local History wrap (the accept overwrites
+/// working content) and a `VcsChanged` for the other windows.
+#[command(trust = trusted)]
+pub async fn vcs_svn_resolve(
+    host: &Host,
+    window: &str,
+    paths: Vec<PathBuf>,
+    accept: SvnResolveAccept,
+) -> IdeResult<()> {
+    host.require_trust(window)?;
+    let project = host.project(window)?;
+    blocking(move || {
+        let result = per_backend(&project, &paths, Some("Resolve conflicts"), |backend, paths| {
+            let svn = backend
+                .as_svn()
+                .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+            svn.resolve(paths, accept)
+        });
+        if result.is_ok() {
+            project.sink.emit(ide_core::IdeEvent::VcsChanged { root: project.root.clone().into() });
+        }
+        result
+    })
+    .await
+}
+
+/// SVN › Add to svn:ignore: merges the selection's names into their parent
+/// directories' `svn:ignore` property (literal names only; unlike Git there
+/// is no rule file to open afterwards, so nothing is returned). Versioned
+/// paths are refused.
+#[command(trust = trusted)]
+pub async fn vcs_svn_add_to_ignore(host: &Host, window: &str, paths: Vec<PathBuf>) -> IdeResult<()> {
+    host.require_trust(window)?;
+    let project = host.project(window)?;
+    blocking(move || {
+        let result = per_backend(&project, &paths, None, |backend, paths| {
+            let svn = backend
+                .as_svn()
+                .ok_or_else(|| ide_core::IdeError::unavailable("this root is not a Subversion working copy"))?;
+            svn.add_to_ignore(paths)
+        });
+        if result.is_ok() {
+            project.sink.emit(ide_core::IdeEvent::VcsChanged { root: project.root.clone().into() });
+        }
+        result
+    })
+    .await
+}
+
+/// Checks a Subversion URL out into `dest` (Get from VCS). Works without an
+/// open project.
+#[command(trust = always)]
+pub async fn vcs_svn_checkout(
+    host: &Host,
+    request: RequestId,
+    url: String,
+    dest: PathBuf,
+    on_output: Channel<String>,
+) -> IdeResult<()> {
+    let cancel = host.begin_request(request);
+    let result = tokio::task::spawn_blocking(move || {
+        ide_vcs::svn::checkout(&url, &dest, &cancel, &|line| {
+            let _ = on_output.send(line);
+        })
+    })
+    .await
+    .map_err(|e| ide_core::IdeError::internal(e.to_string()))?;
+    host.end_request(request);
+    result
+}
+
 /// Added and deleted lines between two revisions (Git Log › lines added and deleted).
 /// `paths` limits the diff to those repository-relative paths; empty diffs every file.
 #[command(trust = always)]
@@ -3312,8 +3515,15 @@ pub async fn vcs_read_patch(host: &Host, window: &str, path: PathBuf) -> IdeResu
 ide_command::domain!(
     vcs_commands:
     vcs_add_to_ignore,
+    vcs_svn_add_to_ignore,
+    vcs_svn_branches,
+    vcs_svn_checkout,
     vcs_svn_cleanup,
+    vcs_svn_copy_branch,
+    vcs_svn_delete_branch,
     vcs_svn_info,
+    vcs_svn_resolve,
+    vcs_svn_switch,
     vcs_svn_update,
     vcs_add_worktree,
     vcs_apply_patch,

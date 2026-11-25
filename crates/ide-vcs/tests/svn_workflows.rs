@@ -6,7 +6,7 @@
 //! none is found the tests print a hint and skip, they do not fail.
 
 use ide_core::IpcPath;
-use ide_vcs::{Backend, ChangeKind, CommitOptions, HunkKind, LogQuery, SvnWorkingCopy, TextEncoding};
+use ide_vcs::{Backend, ChangeKind, CommitOptions, HunkKind, LogQuery, SvnResolveAccept, SvnWorkingCopy, TextEncoding};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -355,4 +355,277 @@ fn line_hunks_mark_changed_lines() {
     let hunks = Backend::line_hunks(&*wc, &fx.path("whole.txt"), "all\nnew\n", false, utf8()).unwrap();
     assert_eq!(hunks.len(), 1);
     assert_eq!((hunks[0].kind, hunks[0].start, hunks[0].lines), (HunkKind::Added, 0, 2));
+}
+
+/// h) blame attributes each line to the commit that last changed it; the
+/// open buffer's uncommitted lines carry an all-zero commit ("Not Committed
+/// Yet"), including mid-file edits — not the neighbouring line's old commit.
+#[test]
+fn blame_maps_lines_to_revisions_and_marks_uncommitted_edits() {
+    let Some(fx) = Fixture::new() else { return };
+    let wc = fx.wc();
+    // r2 appends two lines; r3 then rewrites only the middle one — blame must
+    // keep r1 for the untouched first line.
+    fx.write("a.txt", "one\ntwo\nthree\n");
+    Backend::commit(&*wc, "add lines", &select(&[fx.path("a.txt")]), &|_| Ok(utf8())).unwrap();
+    fx.write("a.txt", "one\nTWO\nthree\n");
+    let r3 = Backend::commit(&*wc, "retitle", &select(&[fx.path("a.txt")]), &|_| Ok(utf8())).unwrap();
+
+    let blame = Backend::blame(&*wc, &fx.path("a.txt"), None, None, utf8()).unwrap();
+    assert_eq!(blame.len(), 3, "{blame:?}");
+    assert_eq!(blame[0].commit, "r1", "line 1 is untouched since r1");
+    assert_eq!(blame[1].commit, r3, "line 2 was rewritten by the last commit");
+    assert_eq!(blame[2].commit, "r2", "line 3 was added by r2");
+
+    // The author and date come from the commit, like the Log shows them.
+    let cancel = ide_core::CancellationToken::new();
+    let log = Backend::log(&*wc, &LogQuery { limit: 10, ..LogQuery::default() }, &cancel).unwrap();
+    let r3_commit = log.iter().find(|c| c.id == r3).unwrap();
+    assert_eq!(blame[1].author, r3_commit.author);
+    assert_eq!(blame[1].time_ms, r3_commit.time_ms);
+
+    // Two buffer lines BASE does not have: uncommitted, all-zero commits.
+    let edited = format!("{}four\nfive\n", fx.read("a.txt"));
+    let blame = Backend::blame(&*wc, &fx.path("a.txt"), Some(&edited), None, utf8()).unwrap();
+    assert_eq!(blame.len(), 5, "{blame:?}");
+    assert_eq!(blame[3].author, "Not Committed Yet");
+    assert!(blame[3..5].iter().all(|line| line.commit.bytes().all(|b| b == b'0')), "{blame:?}");
+
+    // A mid-file edit is uncommitted, not attributed to an old line's commit;
+    // the untouched lines keep their revisions.
+    let blame = Backend::blame(&*wc, &fx.path("a.txt"), Some("one\nTWO!\nthree\n"), None, utf8()).unwrap();
+    assert_eq!(blame.len(), 3, "{blame:?}");
+    assert!(blame[1].commit.bytes().all(|b| b == b'0'), "edited line 2 must be uncommitted: {blame:?}");
+    assert_eq!(blame[0].commit, "r1");
+    assert_eq!(blame[2].commit, "r2");
+
+    // An unversioned file has nothing committed at all.
+    fx.write("scratch.txt", "brand\nnew\n");
+    let blame = Backend::blame(&*wc, &fx.path("scratch.txt"), None, None, utf8()).unwrap();
+    assert_eq!(blame.len(), 2, "{blame:?}");
+    assert!(blame.iter().all(|line| line.commit.bytes().all(|b| b == b'0')));
+}
+
+/// i) A `branch` naming an svn revision pins the walk: one commit plus its
+/// parent (the Annotate popup's previous-revision hop). Non-revision values
+/// keep the default walk.
+#[test]
+fn log_pins_a_branch_revision_with_its_parent() {
+    let Some(fx) = Fixture::new() else { return };
+    let wc = fx.wc();
+    fx.write("a.txt", "one\ntwo\n");
+    let r2 = Backend::commit(&*wc, "second", &select(&[fx.path("a.txt")]), &|_| Ok(utf8())).unwrap();
+    let cancel = ide_core::CancellationToken::new();
+
+    let pinned =
+        Backend::log(&*wc, &LogQuery { limit: 1, branch: Some("r1".into()), ..LogQuery::default() }, &cancel).unwrap();
+    assert_eq!(pinned.len(), 1, "{pinned:?}");
+    assert_eq!(pinned[0].id, "r1");
+    assert!(pinned[0].parents.is_empty(), "r1 is the root: {pinned:?}");
+
+    let pinned =
+        Backend::log(&*wc, &LogQuery { limit: 1, branch: Some(r2.clone()), ..LogQuery::default() }, &cancel).unwrap();
+    assert_eq!(pinned[0].id, r2);
+    assert_eq!(pinned[0].parents, vec!["r1".to_owned()], "the previous revision, for Annotate");
+
+    // A limit above one walks down from the pinned revision; the page itself
+    // provides the parents then.
+    let page =
+        Backend::log(&*wc, &LogQuery { limit: 10, branch: Some("r2".into()), ..LogQuery::default() }, &cancel).unwrap();
+    assert_eq!(page.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec![r2.as_str(), "r1"]);
+    assert_eq!(page[0].parents, vec!["r1".to_owned()]);
+
+    // `main` has no svn meaning: the default walk answers.
+    let default =
+        Backend::log(&*wc, &LogQuery { limit: 10, branch: Some("main".into()), ..LogQuery::default() }, &cancel)
+            .unwrap();
+    assert_eq!(default.len(), 2, "{default:?}");
+}
+
+/// A conflicting update leaves the file Conflicted with its `.mine`/`.rN`
+/// side files; `svn resolve --accept` picks a side, removes the side files
+/// and clears the state. Resolving a path without a conflict is tolerated.
+#[test]
+fn resolve_accepts_each_side_and_clears_the_conflict() {
+    let Some(fx) = Fixture::new() else { return };
+    let wc = fx.wc();
+    let other = fx.second_checkout();
+
+    // One iteration of "both sides edit the same lines, the other commits,
+    // this working copy updates into a conflict".
+    let reconflict = |local: &str, remote: &str, message: &str| {
+        fx.write("a.txt", local);
+        std::fs::write(other.join("a.txt"), remote).unwrap();
+        run(&other, &svn_exe().unwrap().to_string_lossy(), &["commit", "--non-interactive", "-q", "-m", message]);
+        run(&fx.dir, &svn_exe().unwrap().to_string_lossy(), &["update", "--non-interactive"]);
+        let status = Backend::status(&*wc).unwrap();
+        assert_eq!(
+            status.iter().find(|f| f.rel_path == "a.txt").unwrap().unstaged,
+            Some(ChangeKind::Conflicted),
+            "{status:?}"
+        );
+    };
+    let assert_resolved = |expect: &str| {
+        // After `theirs-full` the file can match BASE exactly and drop out of
+        // status entirely; absence is just as resolved.
+        let kind = Backend::status(&*wc).unwrap().into_iter().find(|f| f.rel_path == "a.txt").map(|f| f.unstaged);
+        assert_ne!(kind, Some(Some(ChangeKind::Conflicted)), "conflict state cleared");
+        assert_eq!(fx.read("a.txt"), expect);
+        for suffix in ["mine", "r1", "r2", "r3", "r4", "r5"] {
+            assert!(!fx.path(&format!("a.txt.{suffix}")).exists(), "side file .{suffix} removed with the conflict");
+        }
+    };
+
+    // `working`: the user edits the conflict markers away, then the resolve
+    // accepts the file byte-for-byte as it stands.
+    reconflict("local edit\n", "remote edit\n", "from elsewhere");
+    fx.write("a.txt", "local edit\n");
+    wc.resolve(&[fx.path("a.txt")], SvnResolveAccept::Working).unwrap();
+    assert_resolved("local edit\n");
+
+    // `mine-full` / `theirs-full`: pre-update content vs the incoming revision.
+    reconflict("mine 2\n", "theirs 2\n", "from elsewhere 2");
+    wc.resolve(&[fx.path("a.txt")], SvnResolveAccept::MineFull).unwrap();
+    assert_resolved("mine 2\n");
+
+    reconflict("mine 3\n", "theirs 3\n", "from elsewhere 3");
+    wc.resolve(&[fx.path("a.txt")], SvnResolveAccept::TheirsFull).unwrap();
+    assert_resolved("theirs 3\n");
+
+    // A path without a conflict is skipped with a warning, not an error.
+    wc.resolve(&[fx.path("b.txt")], SvnResolveAccept::Working).unwrap();
+}
+
+/// j) Add to svn:ignore: the name merges into the parent's `svn:ignore`
+/// (LF-separated, no duplicates, CRLF values from other tools survive), the
+/// file disappears from status, versioned and missing paths are refused, and
+/// each parent directory keeps its own value.
+#[test]
+fn add_to_ignore_merges_names_into_the_parent_properties() {
+    let Some(fx) = Fixture::new() else { return };
+    let wc = fx.wc();
+    let svn = svn_exe().unwrap().to_string_lossy().into_owned();
+    let propget = |target: &str| {
+        let out = Command::new(&svn)
+            .args(["propget", "--non-interactive", "svn:ignore", target])
+            .current_dir(&fx.dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "propget {target}: {}", String::from_utf8_lossy(&out.stderr));
+        // Windows propget prints CRLF and pads a trailing newline.
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n").trim_end().to_owned()
+    };
+
+    fx.write("build.log", "noise\n");
+    let status = Backend::status(&*wc).unwrap();
+    assert_eq!(status.iter().find(|f| f.rel_path == "build.log").unwrap().unstaged, Some(ChangeKind::Untracked));
+
+    wc.add_to_ignore(&[fx.path("build.log")]).unwrap();
+    assert_eq!(propget(".").lines().collect::<Vec<_>>(), vec!["build.log"]);
+    assert!(
+        !Backend::status(&*wc).unwrap().iter().any(|f| f.rel_path == "build.log"),
+        "ignored entries are not listed anymore"
+    );
+
+    // Idempotent, and a CRLF value another tool wrote keeps its entries.
+    run(&fx.dir, &svn, &["propset", "--non-interactive", "svn:ignore", "old\r\nbuild.log\r\n", "."]);
+    wc.add_to_ignore(&[fx.path("build.log")]).unwrap();
+    assert_eq!(propget(".").lines().collect::<Vec<_>>(), vec!["old", "build.log"], "merged, deduplicated, LF only");
+
+    // Versioned and missing paths are refused.
+    assert!(wc.add_to_ignore(&[fx.path("a.txt")]).is_err(), "versioned files cannot be ignored");
+    assert!(wc.add_to_ignore(&[fx.path("ghost.txt")]).is_err(), "missing paths cannot be ignored");
+
+    // A nested directory gets its own value; the parent must be versioned
+    // (svn add schedules children too, so the directory goes in first).
+    std::fs::create_dir(fx.path("sub")).unwrap();
+    run(&fx.dir, &svn, &["add", "-q", "sub"]);
+    run(&fx.dir, &svn, &["commit", "--non-interactive", "-q", "-m", "add the sub directory"]);
+    fx.write("sub/inner.log", "x\n");
+    wc.add_to_ignore(&[fx.path("sub/inner.log")]).unwrap();
+    assert_eq!(propget("sub").lines().collect::<Vec<_>>(), vec!["inner.log"], "each parent writes its own value");
+    assert_eq!(propget(".").lines().collect::<Vec<_>>(), vec!["old", "build.log"], "root value untouched");
+
+    // An unversioned parent has no property to write: a clean error, not a
+    // silent half-write.
+    std::fs::create_dir(fx.path("plain")).unwrap();
+    fx.write("plain/thing.txt", "x\n");
+    assert!(wc.add_to_ignore(&[fx.path("plain/thing.txt")]).is_err(), "svn:ignore needs a versioned parent");
+}
+
+/// k) The branch layout: `/branches` and `/tags` read as empty while missing;
+/// copy_branch creates the branch (and its parent directories), switch moves
+/// the working copy's URL and base, the current branch refuses deletion, and
+/// deleting it for real removes it from the layout.
+#[test]
+fn copy_switch_commit_and_delete_branches() {
+    let Some(fx) = Fixture::new() else { return };
+    let wc = fx.wc();
+    let cancel = ide_core::CancellationToken::new();
+
+    // The fixture repository has no layout yet.
+    let layout = wc.branches(&cancel).unwrap();
+    assert!(layout.branches.is_empty() && layout.tags.is_empty(), "{layout:?}");
+
+    let branch_url = wc.copy_branch("my-branch", "create the branch", false, &cancel).unwrap();
+    assert!(branch_url.ends_with("/branches/my-branch"), "{branch_url}");
+    let layout = wc.branches(&cancel).unwrap();
+    assert_eq!(layout.branches.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), vec!["my-branch"]);
+    assert!(layout.tags.is_empty(), "no /tags in this repository");
+
+    // Switch to the branch, commit a file only it has…
+    wc.switch_to(&branch_url, &cancel).unwrap();
+    assert!(wc.url().unwrap().ends_with("/branches/my-branch"), "{}", wc.url().unwrap());
+    fx.write("branch.txt", "on the branch\n");
+    Backend::stage(&*wc, &[fx.path("branch.txt")]).unwrap();
+    Backend::commit(&*wc, "branch work", &select(&[fx.path("branch.txt")]), &|_| Ok(utf8())).unwrap();
+
+    // …and deleting the branch the working copy sits on is refused.
+    assert!(wc.delete_branch("my-branch", "bye", &cancel).is_err(), "the current branch cannot be deleted");
+
+    // Back on the repository root: the branch-only file is gone, status clean.
+    wc.switch_to(&fx.repo_url, &cancel).unwrap();
+    assert!(!fx.path("branch.txt").exists());
+    assert!(Backend::status(&*wc).unwrap().is_empty(), "{:?}", Backend::status(&*wc).unwrap());
+    assert_eq!(Backend::file_at(&*wc, &fx.path("a.txt"), None, utf8()).unwrap().as_deref(), Some("one\n"));
+
+    wc.delete_branch("my-branch", "bye", &cancel).unwrap();
+    let layout = wc.branches(&cancel).unwrap();
+    assert!(layout.branches.is_empty(), "{layout:?}");
+}
+
+/// l) Get from VCS: `svn::checkout` fills a fresh directory (files land, the
+/// working copy discovers with the right URL and UUID), refuses a non-empty
+/// destination without touching it, and a cancelled run leaves no
+/// half-checked-out directory behind.
+#[test]
+fn checkout_fills_a_directory_and_cleans_up_after_a_cancelled_run() {
+    let Some(fx) = Fixture::new() else { return };
+
+    let dest = fx.tmp.path().join("fresh-wc");
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = lines.clone();
+    let cancel = ide_core::CancellationToken::new();
+    ide_vcs::svn::checkout(&fx.repo_url, &dest, &cancel, &move |line| sink.lock().unwrap().push(line)).unwrap();
+    assert!(dest.join(".svn").join("wc.db").is_file());
+    assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "one\n");
+    assert!(!lines.lock().unwrap().is_empty(), "the CLI's progress lines are streamed: {:?}", lines.lock().unwrap());
+    let wc = SvnWorkingCopy::discover(&dest).unwrap().expect("checked-out working copy discovered");
+    assert!(wc.repo_url().unwrap().ends_with("/repo"), "{}", wc.repo_url().unwrap());
+    assert_eq!(wc.uuid().unwrap().len(), 36);
+
+    // A non-empty destination is refused before svn runs — svn itself would
+    // merge the checkout into it.
+    let occupied = fx.tmp.path().join("occupied");
+    std::fs::create_dir(&occupied).unwrap();
+    std::fs::write(occupied.join("keep.txt"), "keep\n").unwrap();
+    assert!(ide_vcs::svn::checkout(&fx.repo_url, &occupied, &cancel, &|_| {}).is_err());
+    assert_eq!(std::fs::read_to_string(occupied.join("keep.txt")).unwrap(), "keep\n", "existing content untouched");
+
+    // A cancelled checkout does not leave a half-populated directory.
+    let cancelled = fx.tmp.path().join("cancelled-wc");
+    let cancel = ide_core::CancellationToken::new();
+    cancel.cancel();
+    assert!(ide_vcs::svn::checkout(&fx.repo_url, &cancelled, &cancel, &|_| {}).is_err());
+    assert!(!cancelled.exists(), "no leftover directory: {}", cancelled.display());
 }

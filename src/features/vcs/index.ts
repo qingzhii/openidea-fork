@@ -9,6 +9,7 @@ import { editorsFor, registerEditorContribution } from "@/editor/api";
 import {
   notifications,
   provideChangesViewSelection,
+  registerCloneSource,
   registerEditorKind,
   registerMenuGroup,
   registerOverlay,
@@ -34,6 +35,7 @@ import { activateRevisionAnnotations } from "./annotateRevisionProvider";
 import { inlineBlame } from "./inlineBlame";
 import { BranchWidget, BranchesPopupHost, SvnRevisionWidget, useBranchesPopup } from "./BranchWidget";
 import { SyncCommitsPopupHost } from "./SyncCommitsPopup";
+import { SvnBranchesPopupHost, useSvnBranchesPopup } from "./svnBranches";
 import { clearUnstashConflictNotices, showConflictsDialog } from "./conflictsUi";
 import { registerCompareActions } from "./compare";
 import { activateDiffViewer } from "./diffViewer";
@@ -116,6 +118,7 @@ function trackTitleItem(): () => void {
       dispose = null;
       shown = null;
       useBranchesPopup.setState({ open: false });
+      useSvnBranchesPopup.setState({ open: false });
     }
     if (wanted && wanted !== shown) {
       shown = wanted;
@@ -235,6 +238,14 @@ export function activate(): () => void {
   useCommit.setState({ signOff: workflowSettings().vcs.git.signOff });
   const disposers = [
     installVcsStore(),
+    // Get from VCS › Subversion (a plain checkout, no shallow clone).
+    registerCloneSource({
+      id: "svn",
+      label: "Subversion",
+      icon: "commit",
+      order: 20,
+      component: lazyComponent(() => import("./SvnCheckoutSource").then((m) => m.SvnCheckoutSource)),
+    }),
     clearUnstashConflictNotices,
     installOperationNoticeExpiry(() => resolvedNoticeRepo),
     installRootSync(),
@@ -289,6 +300,7 @@ export function activate(): () => void {
     installHunkPopup(),
     registerOverlay({ id: "vcs.dialogs", component: VcsDialogHost }),
     registerOverlay({ id: "vcs.branches", component: BranchesPopupHost }),
+    registerOverlay({ id: "vcs.svnBranches", component: SvnBranchesPopupHost }),
     registerOverlay({ id: "vcs.syncCommits", component: SyncCommitsPopupHost }),
     activateConflictBanner(),
     registerWorktreeIncludeEditor(),
@@ -381,12 +393,10 @@ export function activate(): () => void {
       order: 10,
       items: (_menu, { paths: [path] }) => {
         if (!path || !getContext().vcsAvailable) return [];
-        // Annotate drives git blame; Subversion has no annotate support yet.
-        if (useVcs.getState().kind === "svn") return [];
         const shown = editorsFor(path).some((h) => annotationsShown(h.view));
         return [
           {
-            label: shown ? "Close Annotations" : "Annotate with Git Blame",
+            label: shown ? "Close Annotations" : "Annotate with Blame",
             run: () => void executeAction("vcs.annotate", path),
           },
         ];

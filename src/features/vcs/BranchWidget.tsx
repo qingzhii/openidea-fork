@@ -57,6 +57,7 @@ import { currentRepo, currentRepoRoot, focusRepo, loadBranches, repoName, unfetc
 import { useBranchWorktrees } from "./worktrees";
 import { BranchSync } from "./BranchSync";
 import { summarizeBranchSync, type BranchSyncSummary } from "./branchSyncState";
+import { useSvnBranchesPopup } from "./svnBranches";
 import { FetchButton } from "./FetchButton";
 import { showBranchSync } from "./SyncCommitsPopup";
 import { outgoingCount, outgoingDestination, type SyncDirection } from "./syncCommits";
@@ -188,6 +189,7 @@ export function SvnRevisionWidget() {
   const available = useVcs((s) => s.available);
   // Refreshed with the status: an update (and a switch of the selected repository) bumps it.
   const version = useVcs((s) => s.version);
+  const open = useSvnBranchesPopup((s) => s.open);
   const [info, setInfo] = useState<SvnInfo | null>(null);
   useEffect(() => {
     if (!available || !isTauri()) return;
@@ -201,7 +203,15 @@ export function SvnRevisionWidget() {
   }, [available, version]);
   if (!available || !info) return null;
   return (
-    <BarButton variant="title" className={styles.widget} tooltip={[info.url, info.root].filter(Boolean).join("\n")}>
+    <BarButton
+      variant="title"
+      className={styles.widget}
+      data-svn-widget=""
+      tooltip={[info.url, info.root].filter(Boolean).join("\n")}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      onClick={() => useSvnBranchesPopup.setState({ open: !open })}
+    >
       <Icon name="commit" size={16} className={styles.icon} />
       <span className={styles.name} data-toolbar-label="">
         {`r${info.revision}`}

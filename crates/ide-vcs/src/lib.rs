@@ -954,7 +954,10 @@ mod ref_decorations;
 pub mod svn;
 mod worktree_config;
 pub use ops::UNSTAGED_CHANGES_PREVENT_REBASE;
-pub use svn::{SvnWorkingCopy, set_default_svn_executable, svn_executable, svnadmin_executable};
+pub use svn::{
+    SvnBranch, SvnBranches, SvnResolveAccept, SvnWorkingCopy, set_default_svn_executable, svn_executable,
+    svnadmin_executable,
+};
 mod incoming;
 mod refs;
 mod remotes;

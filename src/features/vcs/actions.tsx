@@ -20,6 +20,7 @@ import {
 } from "@/workbench/contributions";
 import { annotationsShown, toggleAnnotations } from "./blame";
 import { showBranchesPopup } from "./BranchWidget";
+import { showSvnBranchesPopup } from "./svnBranches";
 import { rebaseOntoBranch, type BranchRebaseTarget } from "./branchRebase";
 import {
   canCheckoutRevision,
@@ -129,7 +130,7 @@ import { showStashChanges, type StashEntry } from "./StashChanges";
 import { showSyncCommitsForCurrent } from "./SyncCommitsPopup";
 import { tx } from "@/platform/i18n";
 
-import { addToIgnore } from "./ignore";
+import { addToIgnore, addToSvnIgnore } from "./ignore";
 import { hasFileHistory, showCurrentRevision, trackFileHistory } from "./fileRevisions";
 
 const VCS = "vcsAvailable";
@@ -964,17 +965,17 @@ export function registerVcsActions(): () => void {
     },
     {
       id: "vcs.annotate",
-      title: "Annotate with Git Blame",
+      title: "Annotate with Blame",
       category: "Git",
       icon: "history",
-      when: GIT,
+      when: VCS,
       keywords: ["blame", "annotations"],
       toggled: () => {
         const ed = activeEditor();
         return !!ed && annotationsShown(ed.view);
       },
-      // As in IDEA, a file Git has no commit of (unversioned, ignored, or added and not yet
-      // committed) has nothing to annotate; shown annotations can always be closed.
+      // As in IDEA, a file the VCS has no commit of (unversioned, ignored, or added and not
+      // yet committed) has nothing to annotate; shown annotations can always be closed.
       enabled: ({ arg }) => {
         const ed = activeEditor();
         const path = argPath(arg) ?? ed?.ctx.path;
@@ -1007,6 +1008,15 @@ export function registerVcsActions(): () => void {
       when: GIT,
       keywords: ["checkout", "git branches"],
       run: showBranchesPopup,
+    },
+    {
+      id: "vcs.svnBranches",
+      title: "SVN Branches…",
+      category: "Git",
+      icon: "branch",
+      when: SVN,
+      keywords: ["branch", "tag", "switch", "svn"],
+      run: showSvnBranchesPopup,
     },
     {
       id: "vcs.newBranch",
@@ -1141,9 +1151,10 @@ export function registerVcsActions(): () => void {
     },
     {
       id: "vcs.showCommit",
-      title: "Show Commit in Git Log",
+      title: "Show Commit in Log",
       category: "Git",
-      when: GIT,
+      // Blame's click and popup reveal a revision this way; the Log reads svn history too.
+      when: VCS,
       hidden: true,
       run: ({ arg }) => {
         const commit = arg && typeof arg === "object" && "id" in arg ? (arg as import("@/bindings").Commit) : null;
@@ -1172,6 +1183,14 @@ export function registerVcsActions(): () => void {
       keywords: ["ignore", "unversioned", "exclude"],
       run: ({ arg, ctx }) => addToIgnore(focusedPaths(arg, ctx), destination),
     })),
+    {
+      id: "vcs.ignoreSvn",
+      title: "Add to svn:ignore…",
+      category: "Git",
+      when: SVN,
+      keywords: ["ignore", "unversioned", "exclude", "svn"],
+      run: ({ arg, ctx }) => addToSvnIgnore(focusedPaths(arg, ctx)),
+    },
     {
       id: "vcs.addToVcs",
       title: "Add to VCS",
@@ -1294,9 +1313,9 @@ export function registerVcsActions(): () => void {
     {
       id: "vcs.resolveConflicts",
       title: "Resolve Conflicts…",
-      // Conflict resolution (accept side / revert resolved) is still Git-only;
-      // gate until `svn resolve` lands rather than open a dead-end dialog.
-      when: GIT,
+      // Git resolves through the index and revertable accepts; Subversion through
+      // `svn resolve` (Mark Resolved instead of Revert Resolved, which it has no undo for).
+      when: VCS,
       keywords: ["merge"],
       run: ({ arg }) => showConflictsDialog(arg),
     },

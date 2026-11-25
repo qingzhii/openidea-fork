@@ -2558,7 +2558,7 @@
   "No such file or folder": "Böyle bir dosya veya klasör yok",
   "Choose a folder": "Klasör seçin",
   "Nothing to annotate": "Açıklama eklenecek öğe yok",
-  "The file has no committed history in Git.": "Dosyanın Git'te commit edilmiş geçmişi bulunmuyor.",
+  "The file has no committed history.": "Dosyanın commit edilmiş geçmişi bulunmuyor.",
   "Only one runs at a time": "Aynı anda yalnızca biri çalışabilir",
   "Use only {displayName}": "Yalnızca {displayName} kullan",
   "First available: {order}": "İlk kullanılabilir: {order}",

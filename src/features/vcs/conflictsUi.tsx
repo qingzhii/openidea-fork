@@ -153,7 +153,10 @@ export function openMergeEditor(path: string) {
   void editorService().openInput(mergeInput(stripSlash(path)), { focus: true });
 }
 
-/** Accept Yours / Accept Theirs for whole conflicted files. */
+/**
+ * Accept Yours / Accept Theirs for whole conflicted files. Under Subversion this is
+ * `svn resolve --accept mine-full / theirs-full`: the side's whole content, as IDEA maps them.
+ */
 export async function acceptConflictSide(files: readonly string[], side: ConflictSide): Promise<boolean> {
   if (!files.length) return false;
   const paths = files.map(stripSlash);
@@ -171,7 +174,32 @@ export async function acceptConflictSide(files: readonly string[], side: Conflic
     title,
     async () => {
       await saveAll();
-      await call(commands.vcsAcceptConflictSide(paths, side));
+      if (useVcs.getState().kind === "svn")
+        await call(commands.vcsSvnResolve(paths, side === "ours" ? "mineFull" : "theirsFull"));
+      else await call(commands.vcsAcceptConflictSide(paths, side));
+      return true;
+    },
+    { success: count === 1 ? tx`${baseName(path)} resolved` : tx`${count} files resolved` },
+  );
+  return accepted === true;
+}
+
+/**
+ * SVN › Mark Resolved: the hand-edited working text is the resolution (`svn resolve
+ * --accept working`), after editing the conflict markers away. Git needs no counterpart
+ * (its index stages the edit), and svn has no undo for this — the file's pre-resolve
+ * content is only in the editor's Local History.
+ */
+export async function markResolved(files: readonly string[]): Promise<boolean> {
+  if (!files.length) return false;
+  const paths = files.map(stripSlash);
+  const count = paths.length;
+  const path = paths[0]!;
+  const accepted = await runOp(
+    count === 1 ? tx`Mark ${baseName(path)} resolved` : tx`Mark ${count} files resolved`,
+    async () => {
+      await saveAll();
+      await call(commands.vcsSvnResolve(paths, "working"));
       return true;
     },
     { success: count === 1 ? tx`${baseName(path)} resolved` : tx`${count} files resolved` },
@@ -194,6 +222,7 @@ function ConflictsDialog({
   onClose: () => void;
 }) {
   const roots = useVcs((s) => s.roots);
+  const svn = useVcs((s) => s.kind === "svn");
   const scope = stash ? [stash.repo] : (session?.roots ?? repositories);
   const files = conflictedFiles(useVcs((s) => s.status)).filter((file) => inConflictScope(file.path, roots, scope));
   const resolved = useVcs((s) => s.resolvedConflicts);
@@ -241,7 +270,10 @@ function ConflictsDialog({
   };
   const edit = (path: string) => {
     close();
-    openMergeEditor(path);
+    // The three-pane merge editor reads the conflict's side files through the Git
+    // repository; under Subversion the markers are edited in the plain file.
+    if (svn) void editorService().openFile(stripSlash(path), { focus: true });
+    else openMergeEditor(path);
   };
   const pending = files.some((file) => !repo || repoOf(file.path) === repo);
   const conclude = session
@@ -360,6 +392,35 @@ function ConflictsDialog({
           <div className={styles.actions} role="group" aria-label={tx("Conflict resolution")}>
             {canRestore ? (
               <Button onClick={() => void executeAction("vcs.revertResolved", restore)}>Revert Resolved</Button>
+            ) : svn ? (
+              <>
+                <Button
+                  disabled={!canAccept}
+                  onClick={() =>
+                    void acceptConflictSide(
+                      conflicts.map((f) => f.path),
+                      "ours",
+                    )
+                  }
+                >
+                  Accept Yours
+                </Button>
+                <Button
+                  disabled={!canAccept}
+                  onClick={() =>
+                    void acceptConflictSide(
+                      conflicts.map((f) => f.path),
+                      "theirs",
+                    )
+                  }
+                >
+                  Accept Theirs
+                </Button>
+                {/* After editing the markers by hand; svn resolve has no undo for it. */}
+                <Button disabled={!canAccept} onClick={() => void markResolved(conflicts.map((f) => f.path))}>
+                  Mark Resolved
+                </Button>
+              </>
             ) : (
               <>
                 <Button

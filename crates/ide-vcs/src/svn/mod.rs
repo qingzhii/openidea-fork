@@ -9,8 +9,10 @@
 //! files missing from disk, the two states a commit cannot pick up on its own.
 //! Revision strings follow svn's own syntax — `BASE`, `HEAD`, `r123` — with
 //! the working copy's `BASE` playing the role HEAD plays for Git: the side the
-//! Changes view, gutters and diffs compare against. Git-only concepts
-//! (branches, remotes, stash, rebase, annotate) have no svn answer here;
+//! Changes view, gutters and diffs compare against. Concepts with no svn
+//! answer here (remotes, stash, rebase, and Git's branch model beyond the
+//! repository's `/trunk`-`/branches`-`/tags` URL layout, which
+//! [`SvnWorkingCopy::branches`] reads) stay on [`crate::Repo`];
 //! [`Backend::as_git`] returns `None` and callers hide their UI.
 
 pub(crate) mod cli;
@@ -26,10 +28,61 @@ use crate::{
     PendingChange, RevisionChange, TextEncoding, backend::Backend,
 };
 use ide_core::{CancellationToken, IdeError, IdeResult, IpcPath};
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use specta::Type;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// The conflict side [`SvnWorkingCopy::resolve`] accepts (`svn resolve
+/// --accept`). Only the *-full spellings and `working` are offered: the
+/// `*-conflict` variants keep only the conflicted blocks (a half-merged file
+/// that is easy to mistake for a finished one), and `base` throws away both
+/// sides' edits — destructive without a use in the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SvnResolveAccept {
+    /// The file as the working tree holds it — after the user edited the
+    /// conflict markers by hand (svn's `working`).
+    Working,
+    /// The working tree's pre-update content (svn's `mine-full`).
+    MineFull,
+    /// The incoming revision's content (svn's `theirs-full`).
+    TheirsFull,
+}
+
+impl SvnResolveAccept {
+    /// The `--accept` value svn's CLI takes.
+    fn arg(self) -> &'static str {
+        match self {
+            SvnResolveAccept::Working => "working",
+            SvnResolveAccept::MineFull => "mine-full",
+            SvnResolveAccept::TheirsFull => "theirs-full",
+        }
+    }
+}
+
+/// One switchable location of the repository: a directory of the conventional
+/// `/trunk`-`/branches`-`/tags` layout.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SvnBranch {
+    /// The directory's name for display (`trunk`, `my-feature`, `1.2.0`).
+    pub name: String,
+    /// The absolute repository URL, percent-encoded, as svn commands take it.
+    pub url: String,
+}
+
+/// The branch and tag layout of the repository the working copy belongs to.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SvnBranches {
+    /// `/trunk` (when present), then every directory below `/branches`.
+    pub branches: Vec<SvnBranch>,
+    /// Every directory below `/tags`.
+    pub tags: Vec<SvnBranch>,
+}
 
 /// An svn working copy. Cheap to keep around; every read shells out to svn,
 /// which always reflects the current on-disk state.
@@ -238,6 +291,243 @@ impl SvnWorkingCopy {
         Ok(())
     }
 
+    /// Resolves `paths`' conflicts by accepting [`SvnResolveAccept`]'s side
+    /// (`svn resolve --accept`). The conflict-marker files (`.mine`,
+    /// `.rOLD`, `.rNEW`) are removed with the conflict state; diff panels
+    /// opened on them go stale. Resolving a path whose conflict was already
+    /// gone is tolerated (svn skips such targets with a warning): the IDE's
+    /// calls race with the working copy changing underneath.
+    pub fn resolve(&self, paths: &[PathBuf], accept: SvnResolveAccept) -> IdeResult<()> {
+        for path in paths {
+            let rel = self.rel_path(path)?;
+            let args: Vec<&str> = vec!["--non-interactive", "resolve", "--accept", accept.arg(), "--", &rel];
+            let out = cli::run_raw(&self.root, &args)?;
+            if out.code != Some(0)
+                && !cli::stderr_contains(&out, "W155027")
+                && !cli::stderr_contains(&out, "has no conflicts")
+                && !cli::stderr_contains(&out, "resolving skipped")
+            {
+                return Err(cli::failure(&args, &out));
+            }
+        }
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Adds the names of `paths` to their parent directories' `svn:ignore`
+    /// property: the literal entry names only (no patterns), one per line,
+    /// merged into the value already set. Versioned paths are refused, as on
+    /// the Git side — ignoring only affects unversioned entries — and so are
+    /// paths that do not exist. Fails with a dedicated message when the
+    /// parent directory is itself unversioned: svn keeps properties on
+    /// versioned directories only.
+    pub fn add_to_ignore(&self, paths: &[PathBuf]) -> IdeResult<()> {
+        // One propget/propset per parent directory, the names grouped.
+        let mut grouped: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+        for path in paths {
+            match self.status_map(std::slice::from_ref(path))?.get(path) {
+                Some(Some(ChangeKind::Untracked)) => {}
+                // Any other listed kind is a versioned entry (modified,
+                // missing, scheduled).
+                Some(Some(_)) => return Err(versioned_error(path)),
+                // `svn status` does not list clean versioned entries: ask svn
+                // which of the unlisted paths are versioned.
+                _ => {
+                    if self.is_versioned(path)? {
+                        return Err(versioned_error(path));
+                    }
+                    if !path.exists() {
+                        return Err(IdeError::invalid(format!("{} does not exist", path.display())));
+                    }
+                }
+            }
+            let parent = path.parent().ok_or_else(|| IdeError::invalid(format!("cannot ignore {}", path.display())))?;
+            let name =
+                path.file_name().ok_or_else(|| IdeError::invalid(format!("cannot ignore {}", path.display())))?;
+            grouped.entry(parent.to_path_buf()).or_default().push(name.to_string_lossy().into_owned());
+        }
+        for (dir, names) in grouped {
+            let existing = self.propget_ignore(&dir)?;
+            // svn:ignore is matched line by line; values written by other
+            // tools may carry CR endings, and duplicates never help. Original
+            // order, LF line endings.
+            let mut entries: Vec<String> = Vec::new();
+            for line in existing.split('\n') {
+                let line = line.trim_end_matches('\r');
+                if !line.is_empty() && !entries.iter().any(|entry| entry == line) {
+                    entries.push(line.to_owned());
+                }
+            }
+            for name in names {
+                if !entries.iter().any(|entry| entry == &name) {
+                    entries.push(name);
+                }
+            }
+            self.propset_ignore(&dir, &(entries.join("\n") + "\n"))?;
+        }
+        self.invalidate();
+        Ok(())
+    }
+
+    /// The `svn:ignore` value of `dir` (one entry per line); empty when the
+    /// property is not set or the directory cannot answer (`propget` warns
+    /// for the unset property, and errors for unversioned targets).
+    fn propget_ignore(&self, dir: &Path) -> IdeResult<String> {
+        let rel = self.rel_path(dir)?;
+        let target = if rel.is_empty() { ".".to_owned() } else { rel };
+        let args: Vec<&str> = vec!["--non-interactive", "propget", "svn:ignore", "--", &target];
+        let out = cli::run_raw(&self.root, &args)?;
+        Ok(if out.code == Some(0) { out.stdout_str() } else { String::new() })
+    }
+
+    /// Writes `value` as `dir`'s `svn:ignore`. The value goes over stdin
+    /// (`propset -F -`): entries starting with `-` would otherwise be read as
+    /// options, and long ignore lists would run into the Windows command-line
+    /// length limit.
+    fn propset_ignore(&self, dir: &Path, value: &str) -> IdeResult<()> {
+        let rel = self.rel_path(dir)?;
+        let target = if rel.is_empty() { ".".to_owned() } else { rel };
+        let args: Vec<&str> = vec!["--non-interactive", "propset", "-F", "-", "svn:ignore", "--", &target];
+        let out = cli::run_raw_stdin(&self.root, &args, Some(value.as_bytes()))?;
+        if out.code != Some(0) {
+            let failure = cli::failure(&args, &out);
+            return Err(if cli::stderr_contains(&out, "E200009") {
+                IdeError::new(
+                    ide_core::error::ErrorKind::InvalidInput,
+                    format!("svn:ignore needs a versioned parent directory: {}", failure.message),
+                )
+            } else {
+                failure
+            });
+        }
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Whether `path` is a versioned entry. `svn status` only lists *changed*
+    /// entries, so a clean versioned file needs its own question (`svn info`
+    /// fails for unversioned ones).
+    fn is_versioned(&self, path: &Path) -> IdeResult<bool> {
+        let rel = self.rel_path(path)?;
+        let args: Vec<&str> = vec!["--non-interactive", "info", "--", &rel];
+        Ok(cli::run_raw(&self.root, &args)?.code == Some(0))
+    }
+
+    /// The repository's conventional layout (`/trunk`, `/branches/*`,
+    /// `/tags/*`) as `svn ls -r HEAD <url>` reports it: `/trunk` first, then
+    /// the branch and tag names alphabetically. Layout directories that do
+    /// not exist (a bare repository with only `/trunk`, or none of them) read
+    /// as empty lists. Like every remote svn command this needs a reachable
+    /// repository and working credentials; without them the request fails
+    /// with svn's own error.
+    pub fn branches(&self, cancel: &CancellationToken) -> IdeResult<SvnBranches> {
+        let info = self.info()?;
+        let list =
+            |sub: &str| -> IdeResult<Vec<SvnBranch>> { self.ls_dirs(&format!("{}/{sub}", info.repo_root), cancel) };
+        let mut branches = list("branches")?;
+        branches.sort_unstable_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        let mut tags = list("tags")?;
+        tags.sort_unstable_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        let mut all = list("trunk")?;
+        all.append(&mut branches);
+        Ok(SvnBranches { branches: all, tags })
+    }
+
+    /// The directories one level below `url`. A `url` that does not exist in
+    /// the repository (E160013 — no `/branches`, no `/tags`) or a repository
+    /// without a `HEAD` yet (E160006) reads as empty, not as a failure.
+    fn ls_dirs(&self, url: &str, cancel: &CancellationToken) -> IdeResult<Vec<SvnBranch>> {
+        let args: Vec<&str> = vec!["--non-interactive", "ls", "--xml", "-r", "HEAD", url];
+        let out = cli::run_cancellable_raw(&self.root, &args, cancel)?;
+        if out.code != Some(0) {
+            // W160013 + E200009: the layout directory does not exist (verified
+            // against 1.14: svn still prints an empty `<list>` for it, then
+            // fails). E160006: no `HEAD` (an empty repository).
+            if cli::stderr_contains(&out, "E160013")
+                || cli::stderr_contains(&out, "E160006")
+                || cli::stderr_contains(&out, "E200009")
+            {
+                return Ok(Vec::new());
+            }
+            return Err(cli::failure(&args, &out));
+        }
+        Ok(parse::ls(&out.stdout_str())?
+            .into_iter()
+            .filter(|entry| entry.kind == "dir")
+            .map(|entry| {
+                let url = format!("{url}/{}", encode_url_component(&entry.name));
+                SvnBranch { name: entry.name, url }
+            })
+            .collect())
+    }
+
+    /// Switches the working-copy root to `branch_url` (`svn switch`), which
+    /// moves its URL and base revision. Local changes survive the switch
+    /// where svn can carry them over; conflicts surface as errors. The
+    /// cached `svn info` is invalidated, so the next read sees the new URL.
+    pub fn switch_to(&self, branch_url: &str, cancel: &CancellationToken) -> IdeResult<String> {
+        let root = self.root.to_string_lossy().into_owned();
+        let args: Vec<&str> = vec!["--non-interactive", "switch", "--", branch_url, &root];
+        let out = cli::run_cancellable(&self.root, &args, cancel)?;
+        self.invalidate();
+        Ok(out.stdout_str())
+    }
+
+    /// Copies the working copy's current location to `/branches/<name>` — a
+    /// repository-side `svn copy` that commits `message` immediately — and
+    /// returns the new branch's URL. `switch_after` switches the working copy
+    /// to it. `name` is percent-encoded into the URL, like every path of a
+    /// `file://` repository; `--parents` creates `/branches` itself when the
+    /// repository has no layout yet (the copy then commits the missing parent
+    /// directories along).
+    pub fn copy_branch(
+        &self,
+        name: &str,
+        message: &str,
+        switch_after: bool,
+        cancel: &CancellationToken,
+    ) -> IdeResult<String> {
+        if name.trim().is_empty() {
+            return Err(IdeError::invalid("branch name is empty"));
+        }
+        let info = self.info()?;
+        let target = format!("{}/branches/{}", info.repo_root, encode_url_component(name));
+        // `--force-log`: svn refuses a `-m` message that names an existing
+        // path (E205005, guarding `-m file` typos) — this message comes from
+        // the dialog's input field, never from a filename argument.
+        let args: Vec<&str> =
+            vec!["--non-interactive", "copy", "--parents", "--force-log", "-m", message, &info.url, &target];
+        cli::run_cancellable(&self.root, &args, cancel)?;
+        if switch_after {
+            self.switch_to(&target, cancel)?;
+        }
+        Ok(target)
+    }
+
+    /// Deletes `/branches/<name>` in the repository and returns the URL.
+    /// Refused for the branch the working copy currently sits on; the trunk
+    /// is unreachable through this method (it always resolves below
+    /// `/branches`, never to `/trunk`).
+    pub fn delete_branch(&self, name: &str, message: &str, cancel: &CancellationToken) -> IdeResult<String> {
+        if name.trim().is_empty() {
+            return Err(IdeError::invalid("branch name is empty"));
+        }
+        let info = self.info()?;
+        let target = format!("{}/branches/{}", info.repo_root, encode_url_component(name));
+        // A working copy may sit on a subdirectory of the branch
+        // (`/branches/<name>/sub`), so match the prefix, not the exact URL.
+        if info.url == target || info.url.starts_with(&format!("{target}/")) {
+            return Err(IdeError::invalid(format!(
+                "cannot delete the branch the working copy is on ({})",
+                percent_decode(&info.url)
+            )));
+        }
+        // `--force-log`, as in `copy_branch`: the dialog's message may name a path.
+        let args: Vec<&str> = vec!["--non-interactive", "delete", "--force-log", "-m", message, &target];
+        cli::run_cancellable(&self.root, &args, cancel)?;
+        Ok(target)
+    }
+
     /// `svn revert` of one path, tolerating entries that stopped being part of
     /// the working copy between the status read and the write. `-R` gives the
     /// directory recursion (`--depth infinity`).
@@ -362,6 +652,71 @@ fn remove_from_disk(path: &Path) {
     }
 }
 
+/// The rejection [`SvnWorkingCopy::add_to_ignore`] gives for versioned paths,
+/// matching the Git side's wording (`ignore.rs`'s `ls-files` check).
+fn versioned_error(path: &Path) -> IdeError {
+    IdeError::invalid(format!(
+        "{} is already under version control; ignoring only affects unversioned files",
+        path.display()
+    ))
+}
+
+/// Percent-encodes one URL path component: bytes outside the URL-unreserved
+/// set become `%XX`, so names with spaces or non-ASCII spell valid repository
+/// URLs, as the test fixtures' `file_url` helper and svn itself print them.
+fn encode_url_component(name: &str) -> String {
+    let mut url = String::new();
+    for byte in name.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => url.push(*byte as char),
+            other => url.push_str(&format!("%{other:02X}")),
+        }
+    }
+    url
+}
+
+/// Blame rows for lines that have no commit yet: the all-zero id the UI reads
+/// as "not committed yet" (`isUncommitted`, `blame.ts`), like git's porcelain
+/// zeros. `summary` stays empty — an uncommitted line has no commit to quote.
+fn uncommitted_lines(count: usize) -> Vec<BlameLine> {
+    let commit = "0".repeat(40);
+    (0..count)
+        .map(|_| BlameLine {
+            commit: commit.clone(),
+            author: String::from("Not Committed Yet"),
+            time_ms: 0.0,
+            summary: String::new(),
+            origin_path: None,
+        })
+        .collect()
+}
+
+/// Checks `url` out into `dest` (which must not exist or hold anything —
+/// unlike `git clone`, svn itself would happily merge a checkout into an
+/// occupied directory, so the guard is here), streaming the CLI's output
+/// lines. `svn checkout` prints `A`-transfer lines without any percentage, so
+/// the UI shows an indeterminate progress. On failure or cancellation the
+/// directory created for the checkout is removed again, as `git clone` cleans
+/// up after itself; one that existed before stays untouched.
+pub fn checkout(url: &str, dest: &Path, cancel: &CancellationToken, on_output: &dyn Fn(String)) -> IdeResult<()> {
+    let dest = if dest.is_absolute() { dest.to_path_buf() } else { std::env::current_dir()?.join(dest) };
+    if dest.exists() && dest.read_dir()?.next().is_some() {
+        return Err(IdeError::invalid(format!("{} is not empty; check out into an empty folder", dest.display())));
+    }
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let existed = dest.exists();
+    let dest_str = dest.to_string_lossy().into_owned();
+    let args: Vec<&str> = vec!["--non-interactive", "checkout", url, &dest_str];
+    let result = cli::run_streaming(parent, &args, cancel, on_output);
+    if result.is_err() && !existed {
+        // A failed or cancelled checkout must not leave a half-populated
+        // directory behind.
+        remove_from_disk(&dest);
+    }
+    result
+}
+
 impl Backend for SvnWorkingCopy {
     fn root(&self) -> &Path {
         &self.root
@@ -466,14 +821,82 @@ impl Backend for SvnWorkingCopy {
         Ok(parse::diff_line_hunks(&crate::text_encoding::decode(&diff, encoding)))
     }
 
+    /// Annotate via `svn blame --xml -r <revision>`. `text` (the open buffer)
+    /// has no svn CLI counterpart (`blame` has no `--contents`), so uncommitted
+    /// edits are recovered from the diff: hunks of the current text against the
+    /// blamed revision replace the base lines' attribution with the all-zero
+    /// "not committed yet" commit — the same splice git's blame does when its
+    /// `--contents` path is unavailable, so a mid-file edit no longer shows the
+    /// neighbouring line's old commit. `revision` follows the backend's syntax
+    /// (`BASE` by default, `r123`/`123`, `HEAD`); `HEAD` and other repository
+    /// revisions need the network, `BASE` does not. The CLI has no
+    /// cancellation surface here, blame runs to completion.
+    ///
+    /// Binary files annotate to an empty result: svn 1.8+ skips them with a
+    /// `Skipping binary file` warning and exits 0 without entries, and the UI
+    /// reports "nothing to annotate".
     fn blame(
         &self,
-        _path: &Path,
-        _text: Option<&str>,
-        _revision: Option<&str>,
-        _encoding: TextEncoding,
+        path: &Path,
+        text: Option<&str>,
+        revision: Option<&str>,
+        encoding: TextEncoding,
     ) -> IdeResult<Vec<BlameLine>> {
-        Err(IdeError::unavailable("annotate is not supported for SVN working copies yet"))
+        let rel = self.rel_path(path)?;
+        let rev = Self::rev(revision);
+        // The open buffer when the IDE passes one, else the file on disk —
+        // always the content the annotation is displayed against.
+        let current = match text {
+            Some(text) => Some(text.to_owned()),
+            None => {
+                let bytes = std::fs::read(path).ok();
+                bytes.map(|bytes| crate::text_encoding::decode(&bytes, encoding).into_owned())
+            }
+        };
+        let line_count = current.as_deref().unwrap_or("").split_inclusive('\n').count();
+        // Without a version at this revision — unversioned, scheduled for add,
+        // or absent there — nothing is committed at all, like git's untracked
+        // blame.
+        let Some(base) = self.file_at(path, Some(&rev), encoding)? else {
+            return Ok(uncommitted_lines(line_count));
+        };
+        let args: Vec<&str> = vec!["--non-interactive", "blame", "--xml", "-r", &rev, "--", &rel];
+        let out = cli::run(&self.root, &args)?;
+        let entries = parse::blame(&out.stdout_str())?;
+        let hunks = current.as_deref().map(|text| crate::diff::line_hunks(&base, text)).unwrap_or_default();
+        if entries.is_empty() && hunks.is_empty() {
+            // svn skipped the file without any line change around it: the
+            // binary case above. Nothing to annotate.
+            return Ok(Vec::new());
+        }
+        let mut lines: Vec<BlameLine> = entries
+            .into_iter()
+            .map(|entry| BlameLine {
+                // The Log's revision spelling: annotate's previous-revision
+                // hop asks the log for `r<N>` exactly.
+                commit: format!("r{}", entry.revision),
+                author: entry.author,
+                time_ms: entry.time_ms.unwrap_or(0.0),
+                // svn's blame XML has no commit message.
+                summary: String::new(),
+                origin_path: None,
+            })
+            .collect();
+        // Hunks replace the base lines they touch, at their base-text
+        // position, newest position first so earlier splices stay put.
+        for hunk in hunks.into_iter().rev() {
+            let start = (hunk.old_start as usize).min(lines.len());
+            let end = (start + hunk.old_lines as usize).min(lines.len());
+            lines.splice(start..end, uncommitted_lines(hunk.lines as usize));
+        }
+        if current.is_some() {
+            // Defensive: always exactly one entry per line of the text.
+            lines.truncate(line_count);
+            while lines.len() < line_count {
+                lines.extend(uncommitted_lines(1));
+            }
+        }
+        Ok(lines)
     }
 
     fn block_history(
@@ -509,19 +932,34 @@ impl Backend for SvnWorkingCopy {
             let to = Self::rev(Some(to)).parse::<u64>().ok()?;
             Some(format!("{}:{}", from.saturating_add(1), to))
         });
+        // A `branch` naming an svn revision (`r5`/`5`) pins the walk to that
+        // revision's history: the Annotate popup asks for one commit this way
+        // (and hops to the previous revision through the parent, below). Any
+        // other value — git-style branch names — has no svn meaning and is
+        // ignored, keeping the default walk.
+        let pinned = if range.is_none() {
+            query.branch.as_deref().and_then(|branch| Self::rev(Some(branch)).parse::<u64>().ok())
+        } else {
+            None
+        };
         let mut window = query.limit.max(1) + query.skip;
         if filtered {
             window = (window * 10).min(4000);
         }
         let limit = window.to_string();
         if query.limit > 0 && range.is_none() {
-            // A range bounds its own window; --limit would cut it short.
+            // A range bounds its own window; --limit would cut it short. A
+            // pinned walk down from the revision wants the bound.
             args.push("--limit");
             args.push(&limit);
         }
+        let walk: Option<String> = pinned.map(|from| format!("{from}:1"));
         if let Some(range) = &range {
             args.push("-r");
             args.push(range);
+        } else if let Some(walk) = &walk {
+            args.push("-r");
+            args.push(walk);
         } else {
             // Without a revision svn walks down from the working-copy root's
             // own revision, which commits never move — the log would go stale
@@ -628,6 +1066,17 @@ impl Backend for SvnWorkingCopy {
                 commit_time_ms: time_ms,
                 dashed: Vec::new(),
             });
+        }
+        // A pinned query that asks for a single commit has no older entry in
+        // the page; its parent is the revision below it — exactly how
+        // `commits_changes` derives `before` for svn's linear history. The
+        // Annotate popup's previous-revision hop reads it.
+        if let Some(from) = pinned
+            && out.len() == 1
+            && from > 1
+            && let Some(first) = out.first_mut()
+        {
+            first.parents = vec![format!("r{}", from - 1)];
         }
         Ok(out)
     }

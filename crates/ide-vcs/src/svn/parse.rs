@@ -184,6 +184,64 @@ pub(crate) fn log(xml: &str) -> IdeResult<Vec<LogEntry>> {
     Ok(out)
 }
 
+/// One `<entry>` of `svn blame --xml`: line `line_number` (1-based) was last
+/// changed by `revision`. The revision rides on the nested `<commit>` (verified
+/// against 1.14: `<entry line-number="N">` carries no revision of its own);
+/// the author and date live there too, and a local commit can omit them
+/// (anonymous `file://` commits have no `<author>`), which read as empty.
+#[derive(Debug, PartialEq)]
+pub(crate) struct BlameEntry {
+    pub line_number: u32,
+    pub revision: u64,
+    pub author: String,
+    pub time_ms: Option<f64>,
+}
+
+pub(crate) fn blame(xml: &str) -> IdeResult<Vec<BlameEntry>> {
+    let doc = parse_doc(xml, "blame")?;
+    let mut out = Vec::new();
+    if let Some(target) = tag(doc.root(), "blame").and_then(|blame| tag(blame, "target")) {
+        for entry in tags(target, "entry") {
+            let Some(line_number) = entry.attribute("line-number").and_then(|n| n.parse().ok()) else { continue };
+            let commit = tag(entry, "commit");
+            let revision = commit
+                .as_ref()
+                .and_then(|commit| commit.attribute("revision"))
+                // Older server spellings repeat the revision on the entry.
+                .or_else(|| entry.attribute("revision"))
+                .and_then(|revision| revision.parse().ok());
+            let Some(revision) = revision else { continue };
+            out.push(BlameEntry {
+                line_number,
+                revision,
+                author: commit.as_ref().and_then(|commit| text(*commit, "author")).unwrap_or_default().to_owned(),
+                time_ms: commit.as_ref().and_then(|commit| text(*commit, "date")).and_then(time_ms),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// One `<entry>` of `svn ls --xml`: an item of the listed directory.
+#[derive(Debug, PartialEq)]
+pub(crate) struct LsEntry {
+    pub name: String,
+    /// The server's `kind` attribute: `"dir"`, `"file"`, or another reported value.
+    pub kind: String,
+}
+
+pub(crate) fn ls(xml: &str) -> IdeResult<Vec<LsEntry>> {
+    let doc = parse_doc(xml, "ls")?;
+    let mut out = Vec::new();
+    if let Some(list) = tag(doc.root(), "lists").and_then(|lists| tag(lists, "list")) {
+        for entry in tags(list, "entry") {
+            let Some(name) = text(entry, "name") else { continue };
+            out.push(LsEntry { name: name.to_owned(), kind: entry.attribute("kind").unwrap_or_default().to_owned() });
+        }
+    }
+    Ok(out)
+}
+
 /// `svn info --xml` of a working-copy root.
 #[derive(Debug, Clone)]
 pub(crate) struct Info {
@@ -624,6 +682,82 @@ with details</msg>
         assert_eq!(info.url, "file:///repo/trunk");
         assert_eq!(info.repo_root, "file:///repo");
         assert_eq!(info.uuid, "3d9a2007-cfb3-1947-b86d-8fb7f118d501");
+    }
+
+    #[test]
+    fn parses_blame_entries() {
+        // The 1.14 shape, as `svn blame --xml -r BASE` prints it: the entry
+        // carries only the line number, the nested `<commit>` the revision
+        // (plus author and date).
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<blame>
+<target
+   path="a.txt">
+<entry
+   line-number="1">
+<commit
+   revision="1">
+<author>writer</author>
+<date>2026-11-24T16:13:58.601133Z</date>
+</commit>
+</entry>
+<entry
+   line-number="2">
+<commit
+   revision="3">
+<date>2026-11-24T16:20:00.000000Z</date>
+</commit>
+</entry>
+<entry
+   line-number="3"
+   revision="4">
+</entry>
+</target>
+</blame>"#;
+        let entries = blame(xml).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[0],
+            BlameEntry { line_number: 1, revision: 1, author: "writer".to_owned(), time_ms: Some(T1_MS) }
+        );
+        assert_eq!(entries[1].revision, 3);
+        assert_eq!(entries[1].author, "", "anonymous local commits have no author element");
+        assert_eq!(entries[1].time_ms, Some(T2_MS));
+        assert_eq!(
+            entries[2],
+            BlameEntry { line_number: 3, revision: 4, author: String::new(), time_ms: None },
+            "older spellings repeat the revision on the entry"
+        );
+    }
+
+    #[test]
+    fn parses_ls_entries() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<lists>
+<list
+   path="file:///repo/branches">
+<entry
+   kind="dir">
+<name>my-feature</name>
+<commit
+   revision="3">
+<author>writer</author>
+<date>2026-11-24T16:20:00.000000Z</date>
+</commit>
+</entry>
+<entry
+   kind="file">
+<name>README</name>
+</entry>
+</list>
+</lists>"#;
+        assert_eq!(
+            ls(xml).unwrap(),
+            vec![
+                LsEntry { name: "my-feature".to_owned(), kind: "dir".to_owned() },
+                LsEntry { name: "README".to_owned(), kind: "file".to_owned() },
+            ]
+        );
     }
 
     #[test]

@@ -72,7 +72,8 @@ function writeParent(path: string) {
   }
 }
 
-function readRecentUrls(): string[] {
+/** URLs typed into any clone source, most recent first (the SVN source shares the history). */
+export function readRecentUrls(): string[] {
   try {
     const value = JSON.parse(localStorage.getItem(RECENT_URLS_KEY) ?? "[]");
     return Array.isArray(value)
@@ -83,7 +84,7 @@ function readRecentUrls(): string[] {
   }
 }
 
-function rememberUrl(url: string) {
+export function rememberUrl(url: string) {
   try {
     const urls = [url, ...readRecentUrls().filter((item) => item !== url)].slice(0, MAX_RECENT_URLS);
     localStorage.setItem(RECENT_URLS_KEY, JSON.stringify(urls));
@@ -202,7 +203,11 @@ function CloneDialog({ onClose, initialUrl }: { onClose: () => void; initialUrl:
       if (text) setProgress({ line: text, fraction: progressFraction(text) });
     };
     try {
-      await callDesktop("vcs_clone", { request: id, url: cloneUrl.trim(), dest: target, depth, onOutput: channel });
+      // The Subversion source checks out with svn (no depth); everything else clones with git.
+      if (source?.id === "svn")
+        await callDesktop("vcs_svn_checkout", { request: id, url: cloneUrl.trim(), dest: target, onOutput: channel });
+      else
+        await callDesktop("vcs_clone", { request: id, url: cloneUrl.trim(), dest: target, depth, onOutput: channel });
       writeParent(parentOf(target));
       rememberUrl(cloneUrl.trim());
       onClose();
@@ -255,7 +260,11 @@ function CloneDialog({ onClose, initialUrl }: { onClose: () => void; initialUrl:
               data-selected={s.id === sourceId ? "" : undefined}
               aria-pressed={s.id === sourceId}
               disabled={busy}
-              onClick={() => setSourceId(s.id)}
+              onClick={() => {
+                // The svn source has no depth row; a stale checkbox would block cloning.
+                if (s.id === "svn") setShallow(false);
+                setSourceId(s.id);
+              }}
             >
               <Icon name={s.icon} size={16} />
               <span className={styles.sourceName}>
@@ -345,29 +354,32 @@ function CloneDialog({ onClose, initialUrl }: { onClose: () => void; initialUrl:
             </div>
           </div>
 
-          <div className={styles.shallowRow}>
-            <Checkbox
-              checked={shallow}
-              disabled={busy}
-              onChange={setShallow}
-              label={<T>Shallow clone with a history truncated to</T>}
-            />
-            <div className={styles.depthGroup}>
-              <Input
-                aria-label="Clone depth"
-                className={styles.depthInput}
-                type="number"
-                inputMode="numeric"
-                min={1}
-                step={1}
-                value={depthInput}
-                disabled={busy || !shallow}
-                invalid={shallow && depth === null}
-                onChange={(e) => setDepthInput(e.target.value)}
+          {/* Shallow clone is a git concept: the Subversion source has no depth row. */}
+          {source?.id !== "svn" && (
+            <div className={styles.shallowRow}>
+              <Checkbox
+                checked={shallow}
+                disabled={busy}
+                onChange={setShallow}
+                label={<T>Shallow clone with a history truncated to</T>}
               />
-              <T>commits</T>
+              <div className={styles.depthGroup}>
+                <Input
+                  aria-label="Clone depth"
+                  className={styles.depthInput}
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  step={1}
+                  value={depthInput}
+                  disabled={busy || !shallow}
+                  invalid={shallow && depth === null}
+                  onChange={(e) => setDepthInput(e.target.value)}
+                />
+                <T>commits</T>
+              </div>
             </div>
-          </div>
+          )}
 
           <div className={styles.feedback}>
             {busy && (

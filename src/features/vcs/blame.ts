@@ -173,6 +173,9 @@ function optionsMenu(): MenuItem {
   const c = useAnnotateColumns.getState();
   const shown = COLUMNS.filter((k) => c[k]).length;
   const { ignoreWhitespace, movement } = workflowSettings().vcs.git.annotate;
+  // Ignore Whitespaces / Detect Movements tune git's blame only (`git blame -w -M -C`);
+  // Subversion's annotate has no such switches, so they would be dead options there.
+  const gitOnly = useVcs.getState().kind !== "svn";
   return {
     label: "Options",
     submenu: [
@@ -182,27 +185,32 @@ function optionsMenu(): MenuItem {
         disabled: c[k] && shown === 1,
         run: () => setAnnotateColumn(k, !c[k]),
       })),
-      { kind: "separator" },
-      {
-        label: "Ignore Whitespaces",
-        checked: ignoreWhitespace,
-        run: () => saveVcsSetting("vcs.git.annotate.ignoreWhitespace", !ignoreWhitespace, "global"),
-      },
-      {
-        label: "Detect Movements Within File",
-        checked: movement !== "none",
-        run: () => saveVcsSetting("vcs.git.annotate.movement", movement === "none" ? "withinFile" : "none", "global"),
-      },
-      {
-        label: "Detect Movements Across Files",
-        checked: movement === "acrossFiles",
-        run: () =>
-          saveVcsSetting(
-            "vcs.git.annotate.movement",
-            movement === "acrossFiles" ? "withinFile" : "acrossFiles",
-            "global",
-          ),
-      },
+      ...(gitOnly
+        ? [
+            { kind: "separator" as const },
+            {
+              label: "Ignore Whitespaces",
+              checked: ignoreWhitespace,
+              run: () => saveVcsSetting("vcs.git.annotate.ignoreWhitespace", !ignoreWhitespace, "global"),
+            },
+            {
+              label: "Detect Movements Within File",
+              checked: movement !== "none",
+              run: () =>
+                saveVcsSetting("vcs.git.annotate.movement", movement === "none" ? "withinFile" : "none", "global"),
+            },
+            {
+              label: "Detect Movements Across Files",
+              checked: movement === "acrossFiles",
+              run: () =>
+                saveVcsSetting(
+                  "vcs.git.annotate.movement",
+                  movement === "acrossFiles" ? "withinFile" : "acrossFiles",
+                  "global",
+                ),
+            },
+          ]
+        : []),
     ],
   };
 }
@@ -442,6 +450,8 @@ function blameExtension(lines: BlameLine[], source: BlameSource): Extension {
             const l = lineAt(view, block.from);
             const origin = l?.originPath ?? path;
             event.preventDefault();
+            // "Ignore This Commit" writes the repository's .git-blame-ignore-revs: a Git file.
+            const svn = useVcs.getState().kind === "svn";
             showContextMenu(event as MouseEvent, [
               { label: "Close Annotations", run: () => setAnnotations(view, null, source) },
               ...(l && !isUncommitted(l)
@@ -470,15 +480,19 @@ function blameExtension(lines: BlameLine[], source: BlameSource): Extension {
                         void import("./annotateRevision").then((m) => m.annotatePreviousRevision(origin, l.commit)),
                     },
                     {
-                      label: "Show Commit in Git Log",
+                      label: "Show Commit in Log",
                       icon: "commit",
                       run: () => void executeAction("vcs.showCommit", l.commit),
                     },
-                    {
-                      label: "Ignore This Commit",
-                      icon: "hide",
-                      run: () => void ignoreCommit(path, l.commit, () => view.plugin(refresher)?.schedule(0)),
-                    },
+                    ...(!svn
+                      ? [
+                          {
+                            label: "Ignore This Commit",
+                            icon: "hide",
+                            run: () => void ignoreCommit(path, l.commit, () => view.plugin(refresher)?.schedule(0)),
+                          },
+                        ]
+                      : []),
                   ]
                 : []),
               optionsMenu(),
@@ -531,13 +545,14 @@ export async function toggleAnnotations(view: EditorView, path: string, text?: s
   }
   try {
     const lines = await call(commands.vcsBlame(path, text ?? null, revision ?? null));
-    // A file Git has no commit of (unversioned, ignored, added) would get an empty column.
+    // A file the VCS has no commit of (unversioned, ignored, added; a binary file under
+    // Subversion, which skips instead of annotating) would get an empty column.
     if (revision === undefined && lines.every(isUncommitted)) {
       notifications().notify({
         group: "vcs",
         level: "info",
         title: "Nothing to annotate",
-        body: "The file has no committed history in Git.",
+        body: "The file has no committed history.",
       });
       return;
     }

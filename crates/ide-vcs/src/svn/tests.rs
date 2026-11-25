@@ -248,11 +248,11 @@ fn line_hunks_compare_against_base() {
 }
 
 #[test]
-fn blame_and_block_history_are_unsupported() {
+fn block_history_is_unsupported() {
     let Some((_dir, wc)) = fixture() else { return };
     let found = SvnWorkingCopy::discover(&wc).unwrap().unwrap();
-    let error = found.blame(&wc.join("a.txt"), None, None, utf8()).unwrap_err();
-    assert!(error.to_string().to_lowercase().contains("not supported"), "{error}");
+    // Annotate itself works now ([`Backend::blame`]); selection history's
+    // per-block diff walk stays Git-only.
     let error = found.block_history(&wc.join("a.txt"), None, (0, 1), utf8(), &CancellationToken::new()).unwrap_err();
     assert!(error.to_string().to_lowercase().contains("not supported"), "{error}");
 }

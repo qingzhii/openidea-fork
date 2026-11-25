@@ -4,7 +4,7 @@
  * record of the conflict, so it appears whatever the file's text holds and whether or not
  * a merge, rebase or stash is still in progress.
  */
-import { registerEditorBanner } from "@/workbench/contributions";
+import { editorService, registerEditorBanner } from "@/workbench/contributions";
 import { openMergeEditor } from "./conflictsUi";
 import { effectiveKind, stripSlash } from "./model";
 import { useVcs } from "./store";
@@ -22,7 +22,18 @@ export function activate(): () => void {
         ? {
             text: "File has unresolved merge conflicts",
             level: "warning",
-            actions: [{ label: "Resolve conflicts…", run: () => openMergeEditor(path) }],
+            actions: [
+              {
+                label: "Resolve conflicts…",
+                // The three-pane merge editor reads the conflict's side files through
+                // the Git repository; under Subversion the markers are edited in the
+                // plain file (same dispatch as the Conflicts dialog's edit action).
+                run: () =>
+                  useVcs.getState().kind === "svn"
+                    ? void editorService().openFile(stripSlash(path), { focus: true })
+                    : openMergeEditor(path),
+              },
+            ],
           }
         : null;
     },

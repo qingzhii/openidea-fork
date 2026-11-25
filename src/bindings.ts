@@ -2175,13 +2175,55 @@ export const commands = {
 	vcsStatus: () => typedError<FileStatus[], IdeError>(__TAURI_INVOKE("vcs_status")),
 	/**  Changes of `paths` only: the dirty-scope refresh after a watcher batch. */
 	vcsStatusPaths: (paths: string[]) => typedError<FileStatus[], IdeError>(__TAURI_INVOKE("vcs_status_paths", { paths })),
+	/**
+	 *  SVN › Add to svn:ignore: merges the selection's names into their parent
+	 *  directories' `svn:ignore` property (literal names only; unlike Git there
+	 *  is no rule file to open afterwards, so nothing is returned). Versioned
+	 *  paths are refused.
+	 */
+	vcsSvnAddToIgnore: (paths: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_add_to_ignore", { paths })),
+	/**
+	 *  The Subversion repository's conventional layout (`/trunk`, `/branches/*`,
+	 *  `/tags/*`) for the branch/tag switcher. Cancellable — it talks to the
+	 *  repository.
+	 */
+	vcsSvnBranches: (repo: string | null, request: RequestId) => typedError<SvnBranches, IdeError>(__TAURI_INVOKE("vcs_svn_branches", { repo, request })),
+	/**
+	 *  Checks a Subversion URL out into `dest` (Get from VCS). Works without an
+	 *  open project.
+	 */
+	vcsSvnCheckout: (request: RequestId, url: string, dest: string, onOutput: Channel<string>) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_checkout", { request, url, dest, onOutput })),
 	/**  Repairs a Subversion working copy's administrative state (`svn cleanup`). */
 	vcsSvnCleanup: (repo: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_cleanup", { repo })),
+	/**
+	 *  Copies the working copy's current location to `/branches/<name>` (a
+	 *  repository-side `svn copy` that commits `message` immediately), optionally
+	 *  switching the working copy to the new branch. Cancellable.
+	 */
+	vcsSvnCopyBranch: (repo: string | null, request: RequestId, name: string, message: string, switchAfter: boolean, onOutput: Channel<string>) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_copy_branch", { repo, request, name, message, switchAfter, onOutput })),
+	/**
+	 *  Deletes `/branches/<name>` in the repository (refused for the branch the
+	 *  working copy is on). Cancellable.
+	 */
+	vcsSvnDeleteBranch: (repo: string | null, request: RequestId, name: string, message: string, onOutput: Channel<string>) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_delete_branch", { repo, request, name, message, onOutput })),
 	/**
 	 *  Information about the Subversion working copy at `repo` (the project's
 	 *  primary repository when `None`).
 	 */
 	vcsSvnInfo: (repo: string | null) => typedError<SvnInfo, IdeError>(__TAURI_INVOKE("vcs_svn_info", { repo })),
+	/**
+	 *  Resolves `paths`' conflicts by accepting `accept`'s side (`svn resolve
+	 *  --accept`): the hand-edited working text, the pre-update content (`mine`)
+	 *  or the incoming revision (`theirs`). Grouped by repository like the Git
+	 *  conflict commands, with the Local History wrap (the accept overwrites
+	 *  working content) and a `VcsChanged` for the other windows.
+	 */
+	vcsSvnResolve: (paths: string[], accept: SvnResolveAccept) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_resolve", { paths, accept })),
+	/**
+	 *  Switches the working copy at `repo` to `branch_url` (`svn switch`); the
+	 *  output goes back for the VCS console. Cancellable.
+	 */
+	vcsSvnSwitch: (repo: string | null, request: RequestId, branchUrl: string, onOutput: Channel<string>) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_svn_switch", { repo, request, branchUrl, onOutput })),
 	/**
 	 *  Updates the whole Subversion working copy root (`svn update`); the output
 	 *  goes back for the VCS console.
@@ -13326,6 +13368,25 @@ export type StubLink = {
 
 export type SubmoduleRollbackSource = "head" | "index";
 
+/**
+ *  One switchable location of the repository: a directory of the conventional
+ *  `/trunk`-`/branches`-`/tags` layout.
+ */
+export type SvnBranch = {
+	/**  The directory's name for display (`trunk`, `my-feature`, `1.2.0`). */
+	name: string,
+	/**  The absolute repository URL, percent-encoded, as svn commands take it. */
+	url: string,
+};
+
+/**  The branch and tag layout of the repository the working copy belongs to. */
+export type SvnBranches = {
+	/**  `/trunk` (when present), then every directory below `/branches`. */
+	branches: SvnBranch[],
+	/**  Every directory below `/tags`. */
+	tags: SvnBranch[],
+};
+
 /**  A Subversion working copy's `svn info`, for the UI to display. */
 export type SvnInfo = {
 	/**  The working copy's base revision (`"123"`). */
@@ -13335,6 +13396,24 @@ export type SvnInfo = {
 	/**  The working-copy root. */
 	root: string,
 };
+
+/**
+ *  The conflict side [`SvnWorkingCopy::resolve`] accepts (`svn resolve
+ *  --accept`). Only the *-full spellings and `working` are offered: the
+ *  `*-conflict` variants keep only the conflicted blocks (a half-merged file
+ *  that is easy to mistake for a finished one), and `base` throws away both
+ *  sides' edits — destructive without a use in the UI.
+ */
+export type SvnResolveAccept = 
+/**
+ *  The file as the working tree holds it — after the user edited the
+ *  conflict markers by hand (svn's `working`).
+ */
+"working" | 
+/**  The working tree's pre-update content (svn's `mine-full`). */
+"mineFull" | 
+/**  The incoming revision's content (svn's `theirs-full`). */
+"theirsFull";
 
 /**  Version Control › Subversion. */
 export type SvnSettings = {

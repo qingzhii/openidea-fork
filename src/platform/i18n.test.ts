@@ -293,6 +293,7 @@ describe("catalogs", () => {
     "Shell",
     "ID",
     "my-agent",
+    "my-feature",
     "Java",
     "Python",
     "Python {short}",
