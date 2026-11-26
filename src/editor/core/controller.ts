@@ -27,6 +27,7 @@ import {
   clearProjectViewLead,
   getFileDecoration,
   gitMenuItems,
+  gitMenuLabel,
   menuGroupItems,
   notifications,
   openFileExternally,
@@ -1029,7 +1030,7 @@ export class EditorController implements SlotHost {
             openInMenu(slot.model.path, selectedLineContext(view.state)),
             { kind: "separator" },
             localHistoryMenu(slot.model.path),
-            { label: "Git", submenu: gitMenuItems({ paths: [slot.model.path], file: true, ignore: true }) },
+            { label: gitMenuLabel(), submenu: gitMenuItems({ paths: [slot.model.path], file: true, ignore: true }) },
             { kind: "separator" },
             {
               kind: "action",
@@ -2390,7 +2391,9 @@ export class EditorController implements SlotHost {
             { kind: "separator" },
             localHistoryMenu(path),
             ...(inProject
-              ? ([{ label: "Git", submenu: gitMenuItems({ paths: [path], file: true, ignore: true }) }] as MenuItem[])
+              ? ([
+                  { label: gitMenuLabel(), submenu: gitMenuItems({ paths: [path], file: true, ignore: true }) },
+                ] as MenuItem[])
               : []),
             { kind: "separator" },
             { kind: "action", action: "diff.compareWith", arg: path, label: "Compare With…" },

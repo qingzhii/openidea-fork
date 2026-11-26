@@ -679,6 +679,12 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("vcs.commit", "Commit…"),
             act("vcs.push", "Push…"),
             act("vcs.update", "Update Project…"),
+            SEP,
+            // Subversion-only commands; on Git projects the frontend disables them
+            // (`vcsKind == "svn"` gates their actions) instead of hiding the items.
+            act("vcs.svnBranches", "SVN Branches…"),
+            act("vcs.svnCleanup", "SVN Cleanup"),
+            act("vcs.ignoreSvn", "Add to svn:ignore…"),
             act("vcs.pull", "Pull…"),
             act("vcs.fetch", "Fetch"),
             act("vcs.unshallow", "Fetch Full History"),
@@ -953,6 +959,19 @@ pub fn without_action(entries: Vec<Entry>, id: &str) -> Vec<Entry> {
         out.pop();
     }
     out
+}
+
+/// Renames the top-level submenu `id` (`git` becomes `SVN` in a Subversion
+/// project). Children keep theirs, and the id — the frontend routes by action
+/// id, so nothing else has to follow the label.
+pub fn with_toplevel_label(entries: Vec<Entry>, id: &str, label: &'static str) -> Vec<Entry> {
+    entries
+        .into_iter()
+        .map(|e| match e {
+            Entry::Submenu { id: sid, children, .. } if sid == id => Entry::Submenu { id: sid, label, children },
+            e => e,
+        })
+        .collect()
 }
 
 /// Every action id reachable from the spec (with duplicates).
@@ -1237,6 +1256,11 @@ fn prepared_spec<R: Runtime>(app: &AppHandle<R>, os: Os) -> Vec<Entry> {
     let mut entries = spec(os);
     if !crate::commands::window::updates_configured(app) {
         entries = without_action(entries, "app.checkForUpdates");
+    }
+    // A Subversion project shows the menu as SVN (its label the frontend pushes
+    // alongside; `menu_configure` reinstalls when the kind changes).
+    if crate::commands::window::front_vcs_kind(app) == Some(ide_vcs::VcsKind::Svn) {
+        entries = with_toplevel_label(entries, "git", "SVN");
     }
     entries
 }
@@ -2035,6 +2059,36 @@ mod tests {
         config.labels.insert("menu.file.save".into(), "全部保存".into());
         assert_eq!(config.item_text("file.save", "Save All", None), "全部保存");
         assert_eq!(config.label("file", "File"), "File");
+    }
+
+    #[test]
+    fn svn_commands_are_in_the_git_menu() {
+        for os in ALL_OS {
+            let ids = action_ids(&spec(os));
+            for required in ["vcs.svnBranches", "vcs.svnCleanup", "vcs.ignoreSvn"] {
+                assert!(ids.contains(&required), "{required} missing on {os:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn toplevel_relabel_renames_only_that_submenu() {
+        let label_of = |entries: &[Entry], id: &str| {
+            entries
+                .iter()
+                .find_map(|e| match e {
+                    Entry::Submenu { id: sid, label, .. } if *sid == id => Some(*label),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let original = spec(Os::Windows);
+        let entries = with_toplevel_label(original.clone(), "git", "SVN");
+        assert_eq!(label_of(&original, "git"), "Git");
+        assert_eq!(label_of(&entries, "git"), "SVN");
+        assert_eq!(label_of(&entries, "file"), "File");
+        // The id stays: the model routes by action id, not the label.
+        assert!(action_ids(&entries).contains(&"vcs.commit"));
     }
 
     fn rendered_action<'a>(items: &'a [RenderedItem], id: &str) -> Option<&'a RenderedItem> {

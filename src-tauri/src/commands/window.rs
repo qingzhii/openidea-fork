@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, State, WebviewWindow, Window};
+use tauri::{AppHandle, Manager, State, WebviewWindow, Window};
 
 /// Opens `path` in a new window (`new_window`) or tells the caller to open it
 /// itself (`current`). A project already open in some window is focused instead.
@@ -425,6 +425,9 @@ pub fn menu_model(app: AppHandle, state: State<'_, AppState>, menu_state: State<
     if !updates_configured(&app) {
         spec = menu::without_action(spec, "app.checkForUpdates");
     }
+    if front_vcs_kind(&app) == Some(ide_vcs::VcsKind::Svn) {
+        spec = menu::with_toplevel_label(spec, "git", "SVN");
+    }
     let home = dirs::home_dir();
     let config = menu_state.config.lock().clone();
     menu::model(&spec, &menu::recent_items(&state.recent.list(), home.as_deref()), &config)
@@ -532,6 +535,16 @@ pub(crate) fn update_endpoint_env() -> Option<String> {
 /// default, and "Check for Updates…" is hidden then.
 pub fn updates_configured<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     !config_endpoints(app).is_empty() || update_endpoint_env().is_some()
+}
+
+/// The VCS family of the primary repository of the project in front (the focused
+/// window's, else the last focused): the menu shows its Git menu as SVN when this
+/// is Subversion. `None` (no project or repository in front) keeps the defaults.
+pub fn front_vcs_kind<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<ide_vcs::VcsKind> {
+    let window = windows::target_window(app)?;
+    let state = app.try_state::<AppState>()?;
+    let project = state.project(window.label()).ok()?;
+    project.repos.read().primary().map(|repo| repo.kind())
 }
 
 const CNB_ENDPOINT: &str = "https://cnb.cool/l0ng-ai/openidea/-/releases/latest/download/latest.json";

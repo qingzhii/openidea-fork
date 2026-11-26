@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::utils::config::{Color, WindowConfig};
-use tauri::{AppHandle, Emitter, Manager, Theme, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, Runtime, Theme, WebviewWindow, WebviewWindowBuilder};
 
 /// Tells a window that a pending launch is waiting for it.
 pub const LAUNCH_EVENT: &str = "openidea://launch";
@@ -787,7 +787,7 @@ fn send_files_at(app: &AppHandle, window: &WebviewWindow, files: Vec<PathBuf>, p
 }
 
 /// The focused window, else the last focused, else any.
-pub fn target_window(app: &AppHandle) -> Option<WebviewWindow> {
+pub fn target_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
     let windows = app.webview_windows();
     if let Some(w) = windows.values().find(|w| w.is_focused().unwrap_or(false)) {
         return Some(w.clone());

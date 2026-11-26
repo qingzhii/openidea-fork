@@ -6,7 +6,13 @@ import { formatBinding, hostBinding, isMacHost, shortcutLabel } from "@/platform
 import { projectFolder, relativePath, useProject } from "@/platform/project";
 import { attachedProjectOf, currentDetectedRoots, currentRoots } from "@/platform/projectRoots";
 import type { MenuItem } from "@/ui";
-import { menuGroupItems, gitMenuItems, toolWindowService, type MenuGroupContext } from "@/workbench/contributions";
+import {
+  menuGroupItems,
+  gitMenuItems,
+  gitMenuLabel,
+  toolWindowService,
+  type MenuGroupContext,
+} from "@/workbench/contributions";
 import type { FolderRole } from "@/platform/languageSettings";
 import { directoryRole, markDirectory } from "./markDirectory";
 import { fileColorMenu } from "./fileColor";
@@ -375,7 +381,8 @@ export function contextMenuItems(nodes: ProjectNode[]): MenuItem[] {
     push(
       submenu(
         "git",
-        "Git",
+        // SVN projects show this menu as SVN (as the main menu's title does).
+        gitMenuLabel(),
         [
           // Shared with the editor and editor tab menus (IDEA keeps the per-menu groups in sync).
           ...gitMenuItems({

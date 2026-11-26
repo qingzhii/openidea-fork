@@ -107,6 +107,10 @@ export function buildMenuConfig(os: HostOs): MenuConfig {
     toolWindows: toolWindowsRestorable() ? "hidden" : "shown",
   };
   for (const key of keysWithPrefix("menu.")) labels[key] = t(key, params);
+  // A Subversion project shows the Git menu as SVN: the native bar takes its
+  // labels from here (the backend renames the spec's default the same way),
+  // and "SVN" stays hardcoded English like the label it replaces.
+  if (getContext().vcsKind === "svn") labels["menu.git"] = "SVN";
   labels["menu.layout.applyNamed"] = tx("Apply");
   labels["menu.layout.restoreNamed"] = tx("Restore");
   labels["menu.layout.saveNamed"] = tx("Save Changes");
@@ -288,6 +292,11 @@ export function installMenuBridge(): () => void {
     }),
     useToolWindowLayouts.subscribe(push),
     useMenuSlotItems.subscribe(push),
+    // The Git menu's label follows the project's VCS kind, which the first status
+    // refresh after a project opened discovers: rebuild the config with it.
+    useContextKeys.subscribe((ctx, prev) => {
+      if (ctx.vcsKind !== prev.vcsKind) push();
+    }),
     useContextKeys.subscribe(() => pushEnablement()),
     useActions.subscribe(() => pushEnablement()),
     // Project membership and names also change the Open Recent list.

@@ -1,6 +1,7 @@
 /** Main menu for the frameless title bar, with hamburger and persistent title modes. */
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import clsx from "clsx";
+import { useContextKeys } from "@/platform/context";
 import { useProject } from "@/platform/project";
 import { lookup, t, useI18n } from "@/platform/i18n";
 import { commands, type MenuNode } from "@/platform/ipc";
@@ -13,6 +14,9 @@ import { toolWindowsRestorable } from "./toolwindows/store";
 import styles from "./TitleBar.module.css";
 
 function label(id: string, fallback: string): string {
+  // The backend model renames the Git menu "SVN" in Subversion projects; that
+  // label has no catalog key, so the model's own label wins.
+  if (id === "git" && fallback === "SVN") return fallback;
   const key = `menu.${id}`;
   if (lookup(key) === undefined) return fallback;
   return t(key, {
@@ -102,6 +106,10 @@ export function MainMenu({ row = false, ...props }: MainMenuProps) {
 
 function MainMenuBar({ merged, row, onExpandedChange }: MainMenuProps & { merged: boolean; row: boolean }) {
   useI18n((s) => s.locale);
+  // The model carries per-project labels (an SVN project's Git menu), discovered
+  // when the project opens and by its first status refresh: reload it then.
+  const project = useProject((s) => s.project);
+  const vcsKind = useContextKeys((s) => s.vcsKind);
   const iconSize = useChromeIconSize();
   const [menus, setMenus] = useState<Submenu[]>([]);
   const [expanded, setExpanded] = useState(false);
@@ -137,7 +145,7 @@ function MainMenuBar({ merged, row, onExpandedChange }: MainMenuProps & { merged
     return () => {
       disposed = true;
     };
-  }, [merged, row]);
+  }, [merged, row, project, vcsKind]);
   useEffect(() => {
     if (!(merged || row) || open === null) return;
     let disposed = false;

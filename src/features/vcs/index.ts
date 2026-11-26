@@ -5,6 +5,7 @@
  */
 import { onWorkflowSettingsChange, workflowSettings } from "@/platform/workflowSettings";
 import { useTodoSettings } from "@/platform/todo";
+import type { ComponentType } from "react";
 import { editorsFor, registerEditorContribution } from "@/editor/api";
 import {
   notifications,
@@ -144,6 +145,46 @@ function trackTitleItem(): () => void {
   sync(s.available, s.kind);
   const unsub = useVcs.subscribe((st, p) => {
     if (st.available !== p.available || st.kind !== p.kind) sync(st.available, st.kind);
+  });
+  return () => {
+    unsub();
+    dispose?.();
+  };
+}
+
+/**
+ * The Git tool window is the VCS log window: a Subversion project shows it as
+ * SVN (its title, stripe button and View › Tool Windows entry alike). The
+ * components stay the same objects across re-registrations, so the open window
+ * is not remounted when the kind reports.
+ */
+function trackGitToolWindow(): () => void {
+  const component: ComponentType<{ id: string }> = lazyComponent(
+    () => import("./GitLog").then((m) => m.GitToolWindow),
+    { prefetch: true },
+  );
+  const headerContent: ComponentType<{ id: string }> = lazyComponent(() => import("./GitLog").then((m) => m.GitTabs));
+  let dispose: (() => void) | null = null;
+  let shown: string | null = null;
+  const sync = (kind: "git" | "svn" | null) => {
+    const title = kind === "svn" ? "SVN" : "Git";
+    if (title === shown) return;
+    shown = title;
+    dispose?.();
+    dispose = registerToolWindow({
+      id: "git",
+      title,
+      icon: "toolwindow-git",
+      anchor: "bottom",
+      order: 5,
+      component,
+      headerContent,
+    });
+  };
+  const s = useVcs.getState();
+  sync(s.kind);
+  const unsub = useVcs.subscribe((st, prev) => {
+    if (st.kind !== prev.kind) sync(st.kind);
   });
   return () => {
     unsub();
@@ -306,15 +347,7 @@ export function activate(): () => void {
     registerWorktreeIncludeEditor(),
     activateConflictMarkers(),
     trackCommitWindow(),
-    registerToolWindow({
-      id: "git",
-      title: "Git",
-      icon: "toolwindow-git",
-      anchor: "bottom",
-      order: 5,
-      component: lazyComponent(() => import("./GitLog").then((m) => m.GitToolWindow), { prefetch: true }),
-      headerContent: lazyComponent(() => import("./GitLog").then((m) => m.GitTabs)),
-    }),
+    trackGitToolWindow(),
     registerEditorKind({
       kind: "git-revision",
       standalone: true,

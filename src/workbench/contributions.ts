@@ -1543,6 +1543,14 @@ export interface GitMenuContext {
 }
 
 /**
+ * The label of the shared Git › submenu: a Subversion project shows it as SVN
+ * ("Git"/"SVN" stay hardcoded English, like the main menu's own title).
+ */
+export function gitMenuLabel(): string {
+  return getContext().vcsKind === "svn" ? "SVN" : "Git";
+}
+
+/**
  * Git › shared by the editor, editor tab and project view menus (IDEA keeps the
  * per-menu groups in sync). Items are plain action rows, so unregistered actions
  * disappear and `vcsAvailable` gates enablement on its own.
