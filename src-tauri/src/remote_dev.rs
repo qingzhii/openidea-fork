@@ -1493,6 +1493,7 @@ mod tests {
                 name: "app".into(),
                 display_name: "app".into(),
                 is_git: false,
+                vcs: None,
                 settings: Default::default(),
                 workspace: None,
                 unity: None,
