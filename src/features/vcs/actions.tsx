@@ -1123,7 +1123,8 @@ export function registerVcsActions(): () => void {
       title: "Show History for File",
       category: "Git",
       icon: "history",
-      when: GIT,
+      // Backend::log filters by path on both backends (svn log -- <path>).
+      when: VCS,
       run: ({ arg, ctx }) => {
         const path = focusedPaths(arg, ctx)[0];
         if (!path) return;
