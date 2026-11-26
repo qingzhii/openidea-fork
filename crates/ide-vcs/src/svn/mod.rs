@@ -96,6 +96,10 @@ pub struct SvnWorkingCopy {
     /// without re-encoding; [`percent_decode`] only serves display getters.
     info: Mutex<parse::Info>,
     stale: AtomicBool,
+    /// BASE text of versioned paths, cached: the gutter diffs the editor's
+    /// live buffer against it on every keystroke, and `svn cat` spawns a
+    /// process. `None` marks unversioned paths. Cleared by [`Self::invalidate`].
+    base_cache: Mutex<HashMap<PathBuf, Option<String>>>,
 }
 
 impl SvnWorkingCopy {
@@ -107,7 +111,12 @@ impl SvnWorkingCopy {
         let mut dir = start.to_path_buf();
         loop {
             if dir.join(".svn").join("wc.db").is_file() {
-                let wc = Self { root: dir.clone(), info: Mutex::new(run_info(&dir)?), stale: AtomicBool::new(false) };
+                let wc = Self {
+                    root: dir.clone(),
+                    info: Mutex::new(run_info(&dir)?),
+                    stale: AtomicBool::new(false),
+                    base_cache: Mutex::new(HashMap::new()),
+                };
                 return Ok(Some(Arc::new(wc)));
             }
             if !dir.pop() {
@@ -133,8 +142,21 @@ impl SvnWorkingCopy {
 
     /// Marks the cached `svn info` stale; write operations call this so the
     /// next read picks up the new revision (and, after `svn switch`, URL).
+    /// Also drops the cached BASE texts: update/commit/switch move them.
     fn invalidate(&self) {
         self.stale.store(true, Ordering::Release);
+        self.base_cache.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    }
+
+    /// BASE text of `path` at the working revision, cached — `None` when the
+    /// path is unversioned (or absent at BASE).
+    fn base_text(&self, path: &Path, encoding: TextEncoding) -> IdeResult<Option<String>> {
+        if let Some(cached) = self.base_cache.lock().unwrap_or_else(|p| p.into_inner()).get(path) {
+            return Ok(cached.clone());
+        }
+        let text = self.file_at(path, None, encoding)?;
+        self.base_cache.lock().unwrap_or_else(|p| p.into_inner()).insert(path.to_path_buf(), text.clone());
+        Ok(text)
     }
 
     /// The working copy's base revision (`svn info`), refreshing the cache
@@ -810,21 +832,22 @@ impl Backend for SvnWorkingCopy {
         against_index: bool,
         encoding: TextEncoding,
     ) -> IdeResult<Vec<LineHunk>> {
-        // No index: the gutter always compares against BASE.
+        // No index: the gutter diffs the editor's live buffer against BASE in
+        // memory, like the git path does against its HEAD blob. `svn diff`
+        // would read the stale disk file, so markers would only move once the
+        // editor saved the buffer.
         let _ = against_index;
-        let diff = self.diff_bytes(&[path.to_path_buf()], None, &CancellationToken::new())?;
-        if diff.is_empty() {
-            // `svn diff` is also empty for versioned files without edits; only
-            // unversioned ones lack a base side and, like git's untracked
-            // files, render as one Added hunk spanning the whole text.
-            let untracked =
-                matches!(self.status_map(&[path.to_path_buf()])?.get(path), Some(Some(ChangeKind::Untracked)),);
-            if !untracked {
-                return Ok(Vec::new());
-            }
-            return Ok(crate::diff::all_added(current_text));
+        let base = match self.base_text(path, encoding)? {
+            Some(base) => base,
+            // Unversioned files have no base side, like git's untracked ones:
+            // one Added hunk spanning the whole text.
+            None => return Ok(crate::diff::all_added(current_text)),
+        };
+        if base.contains('\u{0}') {
+            // Binary content has no meaningful line hunks.
+            return Ok(Vec::new());
         }
-        Ok(parse::diff_line_hunks(&crate::text_encoding::decode(&diff, encoding)))
+        Ok(crate::diff::line_hunks(&base, current_text))
     }
 
     /// Annotate via `svn blame --xml -r <revision>`. `text` (the open buffer)
@@ -1412,6 +1435,7 @@ mod unit {
                 uuid: String::new(),
             }),
             stale: AtomicBool::new(false),
+            base_cache: Mutex::new(HashMap::new()),
         };
         let info = wc.info().unwrap();
         assert_eq!(wc.wc_rel_from_repo_path("/trunk/a.txt", &info).as_deref(), Some("a.txt"));

@@ -302,6 +302,15 @@ fn line_hunks_distinguish_unchanged_from_unversioned() {
     assert_eq!(hunks.len(), 1, "unversioned file renders as one Added hunk: {hunks:?}");
     assert!(matches!(hunks[0].kind, HunkKind::Added));
     assert_eq!(hunks[0].lines, 1);
+
+    // The gutter follows the LIVE buffer, not the disk file: with the disk
+    // still at BASE ("one\n"), an unsaved buffer edit adds one line.
+    let hunks = Backend::line_hunks(&*wc, &fx.path("a.txt"), "one\nedited unsaved\n", false, encoding).unwrap();
+    assert_eq!(hunks.len(), 1, "unsaved buffer edits mark the changed line: {hunks:?}");
+    assert_eq!(hunks[0].start, 1);
+    assert_eq!(hunks[0].lines, 1);
+    assert!(matches!(hunks[0].kind, HunkKind::Added), "{hunks:?}");
+    assert!(hunks[0].old_text.is_empty(), "nothing was committed for that line: {hunks:?}");
 }
 
 /// g) The IDE file hooks schedule real operations: files_added opens for add,
