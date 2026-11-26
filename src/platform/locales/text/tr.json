@@ -4740,7 +4740,7 @@
   "Show Inherited": "Devralınanları Göster",
   "Show inherited members": "Devralınan üyeleri göster",
   "Show Build": "Derlemeyi Göster",
-  "Show Commit in Git Log": "Commit'i Git Günlüğünde Göster",
+  "Show Commit in Log": "Commit'i Günlükte Göster",
   "Show Container Log": "Kapsayıcı Günlüğünü Göster",
   "Show Context Actions": "Bağlam Eylemlerini Göster",
   "Show Coverage": "Kapsamayı Göster",

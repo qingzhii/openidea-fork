@@ -174,7 +174,7 @@ describe("git blame gutter and commit popup", () => {
       undefined,
       "Annotate at Revision…",
       "Annotate Previous Revision",
-      "Show Commit in Git Log",
+      "Show Commit in Log",
       "Ignore This Commit",
       "Options",
     ]);

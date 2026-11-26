@@ -2049,7 +2049,7 @@
   "Show Inherited": "상속된 항목 표시",
   "Show inherited members": "상속된 멤버 표시",
   "Show Build": "빌드 표시",
-  "Show Commit in Git Log": "Git 로그에서 커밋 표시",
+  "Show Commit in Log": "로그에서 커밋 표시",
   "Show Container Log": "컨테이너 로그 표시",
   "Show Context Actions": "컨텍스트 액션 표시",
   "Show Coverage": "커버리지 표시",

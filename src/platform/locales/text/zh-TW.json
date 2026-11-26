@@ -2829,7 +2829,7 @@
   "Show Inherited": "顯示繼承的成員",
   "Show inherited members": "顯示繼承的成員",
   "Show Build": "顯示建置",
-  "Show Commit in Git Log": "在 Git 記錄中顯示提交",
+  "Show Commit in Log": "在記錄中顯示提交",
   "Show Container Log": "顯示容器記錄",
   "Show Context Actions": "顯示上下文操作",
   "Show Coverage": "顯示覆蓋率",

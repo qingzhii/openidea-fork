@@ -1910,7 +1910,7 @@
   "Show Inherited": "Afficher les éléments hérités",
   "Show inherited members": "Afficher les membres hérités",
   "Show Build": "Afficher le build",
-  "Show Commit in Git Log": "Afficher le commit dans le journal Git",
+  "Show Commit in Log": "Afficher le commit dans le journal",
   "Show Container Log": "Afficher le journal du conteneur",
   "Show Context Actions": "Afficher les actions contextuelles",
   "Show Coverage": "Afficher la couverture",

@@ -1986,7 +1986,7 @@
   "Show Inherited": "Mostrar herdados",
   "Show inherited members": "Mostrar membros herdados",
   "Show Build": "Exibir compilação",
-  "Show Commit in Git Log": "Mostrar commit no log do Git",
+  "Show Commit in Log": "Mostrar commit no log",
   "Show Container Log": "Mostrar log do contêiner",
   "Show Context Actions": "Mostrar ações de contexto",
   "Show Coverage": "Mostrar cobertura",

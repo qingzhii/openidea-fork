@@ -58,7 +58,10 @@ function run(fallback: (reason: "notReady" | "error" | "empty") => Promise<boole
 }
 
 describe("runKindAction fallback", () => {
-  it("uses the server's action when there is one", async () => {
+  // applyCodeAction's reformat poll always runs its full 2 s here (the mocked
+  // execute never edits the doc), so the default 5 s leaves too little headroom
+  // under the whole suite's parallel load.
+  it("uses the server's action when there is one", { timeout: 15_000 }, async () => {
     answer = () => ({ status: "ok", data: [action("Extract to constant")] });
     const fallback = vi.fn(async () => true);
     await run(fallback);

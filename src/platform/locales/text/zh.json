@@ -3274,7 +3274,7 @@
   "Show Inherited": "显示继承的成员",
   "Show inherited members": "显示继承的成员",
   "Show Build": "显示构建",
-  "Show Commit in Git Log": "在 Git 日志中显示提交",
+  "Show Commit in Log": "在日志中显示提交",
   "Show Container Log": "显示容器日志",
   "Show Context Actions": "显示上下文操作",
   "Show Coverage": "显示覆盖率",

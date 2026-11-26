@@ -576,8 +576,9 @@ mod tests {
         run_svn(&base, &["svnadmin", "create", &repo.to_string_lossy()]);
         run_svn(&base, &["svn", "checkout", "-q", &file_url(&repo), &wc.to_string_lossy()]);
         std::fs::write(wc.join("a.txt"), "hello\n").unwrap();
+        // Left scheduled for add on purpose: a committed file is clean, and a
+        // clean working copy has no status entry for the assert below to find.
         run_svn(&wc, &["svn", "add", "-q", "a.txt"]);
-        run_svn(&wc, &["svn", "commit", "-q", "-m", "init"]);
         let nested = wc.join("lib");
         std::fs::create_dir(&nested).unwrap();
         git_init(&nested);

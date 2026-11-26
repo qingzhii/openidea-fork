@@ -1985,7 +1985,7 @@
   "Show Inherited": "Pokaż dziedziczone",
   "Show inherited members": "Pokaż dziedziczone składowe",
   "Show Build": "Pokaż budowanie",
-  "Show Commit in Git Log": "Pokaż zatwierdzenie w dzienniku Git",
+  "Show Commit in Log": "Pokaż zatwierdzenie w dzienniku",
   "Show Container Log": "Pokaż dziennik kontenera",
   "Show Context Actions": "Pokaż akcje kontekstowe",
   "Show Coverage": "Pokaż pokrycie kodu",

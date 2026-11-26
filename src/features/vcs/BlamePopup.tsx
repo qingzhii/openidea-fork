@@ -160,7 +160,7 @@ function BlamePopupView({ state }: { state: BlamePopupState }) {
             <button
               type="button"
               className={styles.hashLink}
-              title={tx("Show Commit in Git Log")}
+              title={tx("Show Commit in Log")}
               onClick={() => {
                 closeBlamePopup();
                 void executeAction("vcs.showCommit", line.commit);

@@ -5,9 +5,11 @@ import { track } from "./measure.ts";
 
 test.skipIf(!chromiumInstalled(true))(
   "track times out on Node's clock when animation frames stop",
-  { timeout: 20_000 },
+  { timeout: 30_000 },
   async () => {
-    const runtime = await launchBrowser({ headless: true });
+    // Chromium teardown can exceed the 5 s default under the whole suite's
+    // parallel load; the larger budget only binds when close actually hangs.
+    const runtime = await launchBrowser({ headless: true }, 10_000);
     try {
       const page = await runtime.browser.newPage();
       await page.evaluate(() => {
