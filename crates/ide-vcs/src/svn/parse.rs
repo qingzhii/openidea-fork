@@ -128,7 +128,7 @@ fn missing(what: &str) -> IdeError {
     IdeError::new(ide_core::error::ErrorKind::Protocol, format!("svn: XML has no <{what}> element"))
 }
 
-fn normalize(path_attr: &str, root: &Path) -> (PathBuf, String) {
+pub(crate) fn normalize(path_attr: &str, root: &Path) -> (PathBuf, String) {
     let unix = path_attr.replace('\\', "/");
     if Path::new(&unix).is_absolute() {
         let path = PathBuf::from(&unix);

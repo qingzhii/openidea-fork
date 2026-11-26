@@ -227,18 +227,35 @@ impl SvnWorkingCopy {
 
     /// Working-area status of `paths` (absolute) or the whole working copy.
     fn status_of(&self, paths: &[PathBuf]) -> IdeResult<Vec<FileStatus>> {
-        Ok(self
-            .status_entries(paths)?
-            .into_iter()
-            .map(|e| FileStatus {
+        let mut out = Vec::new();
+        for e in self.status_entries(paths)? {
+            // `svn status` collapses an unversioned directory into one entry
+            // and never descends into it. The changes tree and the commit
+            // dialog speak in files (git's --untracked-files=all), so such a
+            // directory expands into its files from disk — `.svn` skipped.
+            if e.kind == Some(ChangeKind::Untracked) && self.root.join(&e.path).is_dir() {
+                for file in walk_unversioned_files(&self.root.join(&e.path))? {
+                    let (path, rel_path) = parse::normalize(&file.to_string_lossy(), &self.root);
+                    out.push(FileStatus {
+                        path: IpcPath(path),
+                        rel_path,
+                        staged: None,
+                        unstaged: Some(ChangeKind::Untracked),
+                        renamed_from: None,
+                    });
+                }
+                continue;
+            }
+            out.push(FileStatus {
                 path: IpcPath(e.path),
                 rel_path: e.rel_path,
                 // No index: every change reads as unstaged, scheduled ones included.
                 staged: None,
                 unstaged: e.kind,
                 renamed_from: None,
-            })
-            .collect())
+            });
+        }
+        Ok(out)
     }
 
     /// One batched status lookup, keyed by path.
@@ -649,6 +666,28 @@ fn run_info(dir: &Path) -> IdeResult<parse::Info> {
     let args = ["info", "--xml", "--non-interactive"];
     let out = cli::run(dir, &args)?;
     parse::info(&out.stdout_str())
+}
+
+/// Files under `dir`, recursively — Subversion's own `.svn` skipped. Used to
+/// expand the single `? dir` entry `svn status` reports for an unversioned
+/// directory into the per-file entries the commit dialog speaks in.
+fn walk_unversioned_files(dir: &Path) -> IdeResult<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                if path.file_name() != Some(std::ffi::OsStr::new(".svn")) {
+                    stack.push(path);
+                }
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn percent_decode(text: &str) -> String {

@@ -142,6 +142,10 @@ fn status_classifies_modifications_adds_and_deletes() {
     fx.write("a.txt", "changed\n");
     fx.write("new.txt", "brand new\n");
     std::fs::remove_file(fx.path("b.txt")).unwrap();
+    // An unversioned directory: `svn status` reports only the folder; the
+    // backend must expand it into the files the commit dialog selects.
+    fx.write("newdir/one.txt", "one\n");
+    fx.write("newdir/nested/two.txt", "two\n");
 
     let status = Backend::status(&*wc).unwrap();
     let kind_of = |rel: &str| {
@@ -157,6 +161,13 @@ fn status_classifies_modifications_adds_and_deletes() {
     assert_eq!(kind_of("b.txt"), (None, Some(ChangeKind::Deleted)));
     assert_eq!(kind_of("new.txt"), (None, Some(ChangeKind::Untracked)));
     assert!(!status.iter().any(|f| f.staged.is_some()), "svn has no index: {status:?}");
+
+    // The unversioned directory is expanded into per-file entries — the
+    // folder itself must not appear (regression: the commit dialog could
+    // only offer the folder, never the files inside it).
+    assert_eq!(kind_of("newdir/one.txt"), (None, Some(ChangeKind::Untracked)));
+    assert_eq!(kind_of("newdir/nested/two.txt"), (None, Some(ChangeKind::Untracked)));
+    assert!(!status.iter().any(|f| f.rel_path == "newdir"), "folder entry expanded away: {status:?}");
 
     // status_paths answers only the asked paths.
     let status = Backend::status_paths(&*wc, &[fx.path("a.txt"), fx.path("new.txt")]).unwrap();
