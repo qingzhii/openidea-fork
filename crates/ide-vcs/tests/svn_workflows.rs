@@ -219,6 +219,16 @@ fn stage_commit_and_log_show_the_new_revision() {
     assert_eq!(log[1].parents, Vec::<String>::new());
     assert!(log.iter().all(|c| c.refs.is_empty()));
 
+    // The details panel diffs a commit against its first parent; the parent
+    // must be deterministic even when the log page starts at the newest
+    // commit (regression: page-adjacent parents left the newest row without
+    // one, so the panel showed no changed files).
+    let paged = Backend::log(&*wc, &LogQuery { limit: 1, ..LogQuery::default() }, &cancel).unwrap();
+    assert_eq!(paged.len(), 1);
+    assert_eq!(paged[0].parents, vec![log[1].id.clone()], "parent across page boundary");
+    let files = Backend::diff_revisions(&*wc, &paged[0].parents[0], &paged[0].id).unwrap();
+    assert_eq!(files.len(), 2, "diff against the first parent lists the committed files: {files:?}");
+
     let files = Backend::commit_files(&*wc, &committed).unwrap();
     assert_eq!(files.len(), 2, "{files:?}");
     assert!(files.iter().any(|f| f.path == "feature.txt" && f.kind == ChangeKind::Added));

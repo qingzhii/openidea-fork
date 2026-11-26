@@ -1045,7 +1045,12 @@ impl Backend for SvnWorkingCopy {
         let mut out = Vec::with_capacity(page.len());
         for (index, entry) in page.iter().enumerate() {
             let id = format!("r{}", entry.revision);
-            let parent = page.get(index + 1).map(|prev| format!("r{}", prev.revision));
+            // Linear history, newest first: the parent is the repository's
+            // previous revision — r1 is the root and has none. r{rev-1} is
+            // deterministic even when it falls outside the fetched page, so
+            // the commit details' file list (diff against the first parent)
+            // and the graph lanes stay correct across pages.
+            let parent = (entry.revision > 1).then(|| format!("r{}", entry.revision - 1));
             let summary = entry.message.lines().next().unwrap_or_default().to_owned();
             let time_ms = entry.time_ms.unwrap_or(0.0);
             out.push(Commit {
