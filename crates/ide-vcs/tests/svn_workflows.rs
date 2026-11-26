@@ -237,6 +237,21 @@ fn stage_commit_and_log_show_the_new_revision() {
     // update must see the new HEAD.
     wc.update(&cancel).unwrap();
     assert_eq!(wc.revision().unwrap(), 2, "info cache refreshed");
+
+    // The details panel reads one revision's files through `svn log -v -r N`;
+    // that query must target the repository root URL. Against the working
+    // copy it only reports revisions that changed that exact directory, so a
+    // subdirectory-only commit (everyday case) would come back empty.
+    fx.write("src/nested.txt", "nested\n");
+    run(&fx.dir, &svn_exe().unwrap().to_string_lossy(), &["add", "src"]);
+    let committed =
+        Backend::commit(&*wc, "nested add", &select(&[fx.path("src"), fx.path("src/nested.txt")]), &|_| Ok(utf8()))
+            .unwrap();
+    let files = Backend::commit_files(&*wc, &committed).unwrap();
+    assert_eq!(files.len(), 1, "subdirectory-only revision lists its file: {files:?}");
+    assert_eq!(files[0].path, "src/nested.txt");
+    let details = Backend::log_details(&*wc, &committed).unwrap();
+    assert_eq!(details.message, "nested add");
 }
 
 /// e) Discard (svn revert) restores a modified file to BASE and drops

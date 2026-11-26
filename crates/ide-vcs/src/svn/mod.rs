@@ -601,9 +601,13 @@ impl SvnWorkingCopy {
     }
 
     /// The changed files of one revision, as `svn log -v -r <rev>` lists them.
+    /// Queried against the repository root URL: a working-copy target only
+    /// reports revisions that changed that exact directory, so commits under
+    /// subdirectories would come back empty.
     fn log_entry_changes(&self, revision: u64) -> IdeResult<Vec<(char, String, Option<String>, u64)>> {
         let rev = revision.to_string();
-        let args: Vec<&str> = vec!["--non-interactive", "log", "--xml", "-v", "-r", &rev];
+        let repo_root = self.info()?.repo_root;
+        let args: Vec<&str> = vec!["--non-interactive", "log", "--xml", "-v", "-r", &rev, &repo_root];
         let out = cli::run(&self.root, &args)?;
         Ok(parse::log(&out.stdout_str())?
             .into_iter()
@@ -1117,7 +1121,10 @@ impl Backend for SvnWorkingCopy {
 
     fn log_details(&self, revision: &str) -> IdeResult<crate::LogDetails> {
         let rev = Self::rev(Some(revision));
-        let args: Vec<&str> = vec!["--non-interactive", "log", "--xml", "-r", &rev];
+        // Repository root URL, for the same reason as `log_entry_changes`: a
+        // working-copy target misses revisions that only touched subtrees.
+        let repo_root = self.info()?.repo_root;
+        let args: Vec<&str> = vec!["--non-interactive", "log", "--xml", "-r", &rev, &repo_root];
         let out = cli::run(&self.root, &args)?;
         parse::log(&out.stdout_str())?
             .into_iter()

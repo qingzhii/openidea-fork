@@ -164,6 +164,11 @@ pub(crate) fn log(xml: &str) -> IdeResult<Vec<LogEntry>> {
                 .map(|paths| {
                     tags(paths, "path")
                         .filter_map(|path| {
+                            // Directory entries are listing noise: the file
+                            // lists and diffs this feeds speak in files.
+                            if path.attribute("kind") == Some("dir") {
+                                return None;
+                            }
                             let action = path.attribute("action")?.chars().next()?;
                             let copyfrom = path.attribute("copyfrom-path").map(str::to_owned);
                             let name = path.text()?;
