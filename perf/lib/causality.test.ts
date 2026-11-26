@@ -36,9 +36,30 @@ beforeAll(async () => {
   });
   await server.listen();
   browser = await chromium.launch({ channel: process.env.OPENIDEA_PERF_CHANNEL ?? "chromium" });
-}, 30_000);
+  // The fixture's import graph starts vite's dependency scan and optimization
+  // on first load, and pages loaded before bundling finishes are reloaded when
+  // it does — wiping the in-page state mid-measurement. The first contexts used
+  // to pay that inside the per-test hooks and their 30 s budget (the first run
+  // on a cold vite cache failed the opening tests). Pay the cold start here
+  // once, so every test starts on a settled server.
+  const warm = await browser.newContext();
+  const warmPage = await warm.newPage();
+  await warmPage.goto(server.resolvedUrls!.local[0]!);
+  // The optimizer's finishing reload lands while we wait and destroys the
+  // pending waiter, so re-ask until the marker is seen on a settled page.
+  for (let settle = 0; ; settle++) {
+    try {
+      await warmPage.waitForFunction(() => "__openideaPerf" in window, undefined, { timeout: 60_000 });
+      break;
+    } catch {
+      if (settle > 2) throw new Error("fixture readiness never survived the dev server's cold start");
+      await warmPage.goto(server.resolvedUrls!.local[0]!);
+    }
+  }
+  await warm.close();
+}, 300_000);
 
-// The first context pays the dev server's cold start; closing under load is not instant either.
+// After beforeAll's warmup the server is hot; closing under load is not instant either.
 beforeEach(async () => {
   context = await browser.newContext();
   page = await context.newPage();
