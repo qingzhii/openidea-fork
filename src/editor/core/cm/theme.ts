@@ -30,6 +30,11 @@ export const findStyles = {
     // Its own colour, over the text fill of an identifier highlight around the match.
     WebkitTextFillColor: "currentcolor",
     borderRadius: "2px",
+    // Marks must paint above the selection layer: the search foreground is
+    // tuned for the match background, and the opaque editor selection would
+    // otherwise swallow both (near-black text on near-navy selection).
+    position: "relative",
+    zIndex: 1,
   },
   ".cm-openidea-findExcluded": {
     textDecoration: "line-through",
@@ -39,9 +44,15 @@ export const findStyles = {
   ".cm-openidea-findMatch-current": {
     ...inlineFramedFallback("var(--editor-search-current)", FIND_CURRENT_FRAME),
     color: "var(--fg-search-match, inherit)",
+    position: "relative",
+    zIndex: 1,
   },
   "@supports (height: 1lh)": {
-    ".cm-openidea-findMatch-current": inlineFramedModern("var(--editor-search-current)", FIND_CURRENT_FRAME),
+    ".cm-openidea-findMatch-current": {
+      ...inlineFramedModern("var(--editor-search-current)", FIND_CURRENT_FRAME),
+      position: "relative",
+      zIndex: 1,
+    },
   },
 };
 
