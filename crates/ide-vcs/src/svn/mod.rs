@@ -202,9 +202,16 @@ impl SvnWorkingCopy {
     /// `svn diff --summarize` print them) translated into this working copy's
     /// relative path. Files outside the working copy's subtree (other branches
     /// in the same repository) map to nothing.
+    ///
+    /// svn percent-encodes URLs, and WHICH characters get encoded (and the hex
+    /// case) can differ between `svn info` and `svn log -v` on real servers —
+    /// a byte-exact prefix strip would then drop every entry of the changed
+    /// file lists. Compare the decoded spellings instead.
     fn wc_rel_from_repo_path(&self, repo_path: &str, info: &parse::Info) -> Option<String> {
-        let subpath = info.url.strip_prefix(&info.repo_root).unwrap_or_default();
-        let rel = repo_path.strip_prefix(subpath)?;
+        let sub_raw = info.url.strip_prefix(&info.repo_root).unwrap_or(info.url.as_str());
+        let subpath = percent_decode(sub_raw);
+        let decoded = percent_decode(repo_path);
+        let rel = decoded.strip_prefix(subpath.as_str())?;
         let rel = rel.trim_start_matches('/');
         (!rel.is_empty()).then(|| rel.to_owned())
     }
@@ -1193,7 +1200,12 @@ impl Backend for SvnWorkingCopy {
                     'R' => ChangeKind::Renamed,
                     _ => ChangeKind::Modified,
                 };
-                let path = self.wc_rel_from_repo_path(&repo_path, &info)?;
+                // An entry whose repo path does not map into this working
+                // copy (URL spelling drift on real servers) still shows —
+                // an unmapped path beats an invisible commit.
+                let path = self
+                    .wc_rel_from_repo_path(&repo_path, &info)
+                    .unwrap_or_else(|| repo_path.trim_start_matches('/').to_owned());
                 let old_path = copyfrom.as_ref().and_then(|from| self.wc_rel_from_repo_path(from, &info));
                 Some(ChangedFile { path, kind, old_path, link: None })
             })
@@ -1206,7 +1218,11 @@ impl Backend for SvnWorkingCopy {
         for commit in commits {
             let number = Self::number(commit)?;
             for (action, repo_path, copyfrom, revision) in self.log_entry_changes(number)? {
-                let Some(path) = self.wc_rel_from_repo_path(&repo_path, &info) else { continue };
+                // Same fallback as `commit_files`: an unmapped repo path still
+                // shows — an invisible entry hides the whole commit.
+                let path = self
+                    .wc_rel_from_repo_path(&repo_path, &info)
+                    .unwrap_or_else(|| repo_path.trim_start_matches('/').to_owned());
                 let kind = match action {
                     'A' => ChangeKind::Added,
                     'D' => ChangeKind::Deleted,
@@ -1236,7 +1252,10 @@ impl Backend for SvnWorkingCopy {
         Ok(parse::summarize(&out.stdout_str())?
             .into_iter()
             .filter_map(|row| {
-                let path = self.wc_rel_from_repo_path(&row.path, &info)?;
+                // Same unmapped-path fallback as `commit_files`.
+                let path = self
+                    .wc_rel_from_repo_path(&row.path, &info)
+                    .unwrap_or_else(|| row.path.trim_start_matches('/').to_owned());
                 Some(ChangedFile { path, kind: row.kind, old_path: None, link: None })
             })
             .collect())
@@ -1488,5 +1507,13 @@ mod unit {
         assert_eq!(wc.wc_rel_from_repo_path("/trunk/sub/b.txt", &info).as_deref(), Some("sub/b.txt"));
         assert_eq!(wc.wc_rel_from_repo_path("/branches/other/x", &info), None, "outside the working copy's subtree");
         assert_eq!(wc.wc_rel_from_repo_path("/trunk", &info), None, "the working copy root itself");
+        // Percent-encoded repo paths decode before the prefix strip: real
+        // servers spell non-ASCII/unsafe characters differently in `svn
+        // info` and `svn log -v`.
+        assert_eq!(
+            wc.wc_rel_from_repo_path("/trunk/%E4%B8%AD%E6%96%87.txt", &info).as_deref(),
+            Some("中文.txt"),
+            "percent-encoded path decodes into the working-copy relative name"
+        );
     }
 }
